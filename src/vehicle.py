@@ -32,11 +32,16 @@ class VehicleState:
 
 @dataclass
 class Observations:
+    # M1 fields (unchanged)
     forward_rgb: NDArray[np.uint8]  # [480, 640, 4] RGBA
     rear_rgb: NDArray[np.uint8]  # [480, 640, 4] RGBA
-    depth: NDArray[np.float32]  # [480, 640] meters
+    depth: NDArray[np.float32]  # [480, 640] meters (forward)
     imu: IMUReading
     state: VehicleState
+    # M2 additions
+    rear_depth: NDArray[np.float32]  # [480, 640] meters (rear)
+    forward_semantic: NDArray[np.uint32]  # [480, 640] semantic IDs (forward)
+    rear_semantic: NDArray[np.uint32]  # [480, 640] semantic IDs (rear)
 
 
 # ---------------------------------------------------------------------------
@@ -193,4 +198,7 @@ class Vehicle:
             depth=raw_obs["depth"],
             imu=imu_reading,
             state=state,
+            rear_depth=raw_obs["rear_depth"],
+            forward_semantic=raw_obs["forward_semantic"],
+            rear_semantic=raw_obs["rear_semantic"],
         )

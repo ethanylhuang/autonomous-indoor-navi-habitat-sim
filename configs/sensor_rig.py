@@ -5,7 +5,7 @@ ready for mounting on an agent. IMU is not a habitat-sim sensor and is not defin
 """
 
 import math
-from typing import List
+from typing import List, Tuple
 
 import habitat_sim
 from habitat_sim.sensor import SensorType
@@ -15,8 +15,9 @@ from habitat_sim.sensor import SensorType
 # ---------------------------------------------------------------------------
 
 SENSOR_HEIGHT: float = 1.5  # meters above agent origin (Y axis)
-RGB_RESOLUTION: tuple[int, int] = (480, 640)  # (H, W)
-DEPTH_RESOLUTION: tuple[int, int] = (480, 640)  # (H, W)
+RGB_RESOLUTION: Tuple[int, int] = (480, 640)  # (H, W)
+DEPTH_RESOLUTION: Tuple[int, int] = (480, 640)  # (H, W)
+SEMANTIC_RESOLUTION: Tuple[int, int] = (480, 640)  # match RGB for pixel alignment
 HFOV: int = 90  # degrees
 
 
@@ -60,6 +61,49 @@ def depth_spec() -> habitat_sim.CameraSensorSpec:
     return spec
 
 
+def rear_depth_spec() -> habitat_sim.CameraSensorSpec:
+    """Rear-facing depth sensor, co-located with rear_rgb."""
+    spec = habitat_sim.CameraSensorSpec()
+    spec.uuid = "rear_depth"
+    spec.sensor_type = SensorType.DEPTH
+    spec.resolution = list(DEPTH_RESOLUTION)
+    spec.position = [0.0, SENSOR_HEIGHT, 0.0]
+    spec.orientation = [0.0, math.pi, 0.0]
+    spec.hfov = HFOV
+    return spec
+
+
+def forward_semantic_spec() -> habitat_sim.CameraSensorSpec:
+    """Forward-facing semantic sensor, co-located with forward_rgb."""
+    spec = habitat_sim.CameraSensorSpec()
+    spec.uuid = "forward_semantic"
+    spec.sensor_type = SensorType.SEMANTIC
+    spec.resolution = list(SEMANTIC_RESOLUTION)
+    spec.position = [0.0, SENSOR_HEIGHT, 0.0]
+    spec.orientation = [0.0, 0.0, 0.0]
+    spec.hfov = HFOV
+    return spec
+
+
+def rear_semantic_spec() -> habitat_sim.CameraSensorSpec:
+    """Rear-facing semantic sensor, co-located with rear_rgb."""
+    spec = habitat_sim.CameraSensorSpec()
+    spec.uuid = "rear_semantic"
+    spec.sensor_type = SensorType.SEMANTIC
+    spec.resolution = list(SEMANTIC_RESOLUTION)
+    spec.position = [0.0, SENSOR_HEIGHT, 0.0]
+    spec.orientation = [0.0, math.pi, 0.0]
+    spec.hfov = HFOV
+    return spec
+
+
 def all_sensor_specs() -> List[habitat_sim.CameraSensorSpec]:
-    """All sensor specs for M1. Extend this list in future milestones."""
-    return [forward_rgb_spec(), rear_rgb_spec(), depth_spec()]
+    """All sensor specs for M1+M2."""
+    return [
+        forward_rgb_spec(),
+        rear_rgb_spec(),
+        depth_spec(),
+        rear_depth_spec(),
+        forward_semantic_spec(),
+        rear_semantic_spec(),
+    ]

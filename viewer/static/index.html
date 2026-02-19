@@ -206,6 +206,46 @@
         </div>
     </div>
 
+    <!-- M2 Perception Panels -->
+    <div class="camera-row">
+        <div class="panel">
+            <div class="panel-title">Point Cloud BEV</div>
+            <img id="pointCloudBev" alt="Point Cloud Bird's-Eye View">
+        </div>
+        <div class="panel">
+            <div class="panel-title">Occupancy Grid</div>
+            <img id="occGrid" alt="Occupancy Grid">
+        </div>
+        <div class="panel">
+            <div class="panel-title">Semantic Overlay</div>
+            <img id="semanticFwd" alt="Semantic Overlay">
+        </div>
+    </div>
+
+    <div class="bottom-row">
+        <div class="panel">
+            <div class="panel-title">VO Trajectory</div>
+            <img id="voTrajectory" alt="VO Trajectory">
+        </div>
+        <div class="panel">
+            <div class="panel-title">M2 Perception Stats</div>
+            <div class="state-grid">
+                <span class="label">VO Inliers:</span>
+                <span class="value" id="voInliers">--</span>
+                <span class="label">VO Valid:</span>
+                <span class="value" id="voValid">--</span>
+                <span class="label">Occupied Cells:</span>
+                <span class="value" id="occupiedCells">--</span>
+                <span class="label">Free Cells:</span>
+                <span class="value" id="freeCells">--</span>
+                <span class="label">Fwd Obstacle Px:</span>
+                <span class="value" id="fwdObstaclePx">--</span>
+                <span class="label">Rear Obstacle Px:</span>
+                <span class="value" id="rearObstaclePx">--</span>
+            </div>
+        </div>
+    </div>
+
     <div class="controls">
         Controls:
         <kbd>W</kbd> Forward |

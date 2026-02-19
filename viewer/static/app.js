@@ -27,6 +27,17 @@
     const imuStep = document.getElementById("imuStep");
     const resetBtn = document.getElementById("resetBtn");
     const statusEl = document.getElementById("connection-status");
+    // M2 DOM references
+    const pointCloudBevImg = document.getElementById("pointCloudBev");
+    const occGridImg = document.getElementById("occGrid");
+    const semanticFwdImg = document.getElementById("semanticFwd");
+    const voTrajectoryImg = document.getElementById("voTrajectory");
+    const voInliersEl = document.getElementById("voInliers");
+    const voValidEl = document.getElementById("voValid");
+    const occupiedCellsEl = document.getElementById("occupiedCells");
+    const freeCellsEl = document.getElementById("freeCells");
+    const fwdObstaclePxEl = document.getElementById("fwdObstaclePx");
+    const rearObstaclePxEl = document.getElementById("rearObstaclePx");
 
     // -- Key mappings -----------------------------------------------------
     const KEY_MAP = {
@@ -77,6 +88,31 @@
         imuAccel.textContent = fmtArr(imu.linear_acceleration);
         imuAngVel.textContent = fmtArr(imu.angular_velocity);
         imuStep.textContent = imu.timestamp_step;
+
+        // M2 perception images
+        if (data.point_cloud_bev) {
+            pointCloudBevImg.src = "data:image/png;base64," + data.point_cloud_bev;
+        }
+        if (data.occupancy_grid) {
+            occGridImg.src = "data:image/png;base64," + data.occupancy_grid;
+        }
+        if (data.semantic_fwd) {
+            semanticFwdImg.src = "data:image/jpeg;base64," + data.semantic_fwd;
+        }
+        if (data.vo_trajectory) {
+            voTrajectoryImg.src = "data:image/png;base64," + data.vo_trajectory;
+        }
+
+        // M2 stats
+        if (data.m2_stats) {
+            var m2 = data.m2_stats;
+            voInliersEl.textContent = m2.vo_inliers;
+            voValidEl.textContent = m2.vo_valid ? "Yes" : "No";
+            occupiedCellsEl.textContent = m2.occupied_cells;
+            freeCellsEl.textContent = m2.free_cells;
+            fwdObstaclePxEl.textContent = m2.fwd_obstacle_pixels;
+            rearObstaclePxEl.textContent = m2.rear_obstacle_pixels;
+        }
 
         waitingForResponse = false;
     }
