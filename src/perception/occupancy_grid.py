@@ -12,7 +12,6 @@ Grid coordinate system:
 Values: 0.0 = free, 1.0 = occupied, 0.5 = unknown.
 """
 
-import math
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -21,6 +20,7 @@ from numpy.typing import NDArray
 
 from src.perception.obstacle_detector import ObstacleDetection
 from src.sensors.lidar import PointCloud
+from src.utils.transforms import focal_length_from_hfov, quat_to_rotation_matrix
 
 
 @dataclass
@@ -188,11 +188,8 @@ class OccupancyGrid:
         occupied_cells: List[Tuple[int, int]],
     ) -> None:
         """Back-project obstacle mask pixels to 3D and project to grid."""
-        from src.sensors.imu import quat_to_rotation_matrix
-
         H, W = det.mask.shape
-        hfov_rad = math.radians(hfov_deg)
-        fx = W / (2.0 * math.tan(hfov_rad / 2.0))
+        fx = focal_length_from_hfov(hfov_deg, W)
         cx = W / 2.0
         cy = H / 2.0
 

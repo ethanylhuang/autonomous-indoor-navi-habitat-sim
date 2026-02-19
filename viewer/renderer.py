@@ -14,6 +14,7 @@ from numpy.typing import NDArray
 
 from src.perception.occupancy_grid import OccupancyGridData
 from src.sensors.lidar import PointCloud
+from src.utils.transforms import yaw_from_quaternion
 
 
 def encode_rgb_jpeg(rgba: NDArray[np.uint8], quality: int = 80) -> bytes:
@@ -109,14 +110,7 @@ def render_topdown_view(
     # Draw agent as red circle
     cv2.circle(canvas, (agent_px_x, agent_px_y), 6, (0, 0, 255), -1)
 
-    # Compute heading from quaternion (yaw around Y axis)
-    # For quaternion [w, x, y, z], yaw = atan2(2(wy + xz), 1 - 2(y^2 + z^2))
-    # But in habitat-sim Y-up coords, heading in XZ plane:
-    w, x, y, z = agent_rotation
-    # Agent forward is -Z in local frame. Yaw from quaternion:
-    siny_cosp = 2.0 * (w * y + x * z)
-    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-    yaw = math.atan2(siny_cosp, cosy_cosp)
+    yaw = yaw_from_quaternion(agent_rotation)
 
     # Heading arrow: agent forward is -Z, so in pixel coords:
     # pixel_x maps to world X, pixel_y maps to world Z
@@ -273,11 +267,7 @@ def render_occupancy_grid(
 
     cv2.circle(canvas, (agent_px_x, agent_px_y), 5, (255, 255, 0), -1)
 
-    # Draw heading arrow
-    w, x, y, z = agent_rotation
-    siny_cosp = 2.0 * (w * y + x * z)
-    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-    yaw = math.atan2(siny_cosp, cosy_cosp)
+    yaw = yaw_from_quaternion(agent_rotation)
     arrow_len = 15
     dx = -math.sin(yaw) * arrow_len
     dy = -math.cos(yaw) * arrow_len

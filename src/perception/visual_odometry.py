@@ -8,13 +8,14 @@ translation direction but not magnitude. M3's EKF fuses VO rotation
 with IMU-derived displacement to resolve scale.
 """
 
-import math
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import cv2
 import numpy as np
 from numpy.typing import NDArray
+
+from src.utils.transforms import focal_length_from_hfov
 
 
 @dataclass
@@ -49,15 +50,13 @@ class VisualOdometry:
             max_features: Maximum ORB features to detect.
         """
         H, W = resolution
-        hfov_rad = math.radians(hfov_deg)
-        fx = W / (2.0 * math.tan(hfov_rad / 2.0))
-        fy = fx  # square pixels
+        fx = focal_length_from_hfov(hfov_deg, W)
         cx = W / 2.0
         cy = H / 2.0
 
         self._K = np.array([
             [fx, 0.0, cx],
-            [0.0, fy, cy],
+            [0.0, fx, cy],
             [0.0, 0.0, 1.0],
         ], dtype=np.float64)
 

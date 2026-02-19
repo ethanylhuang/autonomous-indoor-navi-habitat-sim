@@ -13,6 +13,8 @@ from typing import Optional
 import numpy as np
 from numpy.typing import NDArray
 
+from src.utils.transforms import quat_multiply, quat_to_rotation_matrix
+
 
 # ---------------------------------------------------------------------------
 # Data types
@@ -43,64 +45,6 @@ class IMUReading:
             angular_velocity=R_inv @ self.angular_velocity,
             timestamp_step=self.timestamp_step,
         )
-
-
-# ---------------------------------------------------------------------------
-# Quaternion utilities (public -- used by lidar.py as well)
-# ---------------------------------------------------------------------------
-
-def quat_to_rotation_matrix(q: NDArray[np.float64]) -> NDArray[np.float64]:
-    """Convert quaternion [w, x, y, z] to 3x3 rotation matrix.
-
-    Returns:
-        [3, 3] float64 rotation matrix.
-    """
-    q = np.asarray(q, dtype=np.float64)
-    w, x, y, z = q
-    return np.array([
-        [1 - 2*(y*y + z*z),   2*(x*y - w*z),       2*(x*z + w*y)],
-        [2*(x*y + w*z),       1 - 2*(x*x + z*z),   2*(y*z - w*x)],
-        [2*(x*z - w*y),       2*(y*z + w*x),       1 - 2*(x*x + y*y)],
-    ], dtype=np.float64)
-
-
-# ---------------------------------------------------------------------------
-# Quaternion helpers
-# ---------------------------------------------------------------------------
-
-def quat_multiply(q1: NDArray[np.float64], q2: NDArray[np.float64]) -> NDArray[np.float64]:
-    """Hamilton product q1 * q2 for [w, x, y, z] quaternions."""
-    w1, x1, y1, z1 = q1
-    w2, x2, y2, z2 = q2
-    return np.array([
-        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
-        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
-        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
-        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
-    ], dtype=np.float64)
-
-
-# Keep private alias for internal use
-_quat_multiply = quat_multiply
-
-
-def _quat_inverse(q: NDArray[np.float64]) -> NDArray[np.float64]:
-    """Inverse of a unit quaternion [w, x, y, z]."""
-    inv = q.copy()
-    inv[1:] *= -1.0  # conjugate == inverse for unit quats
-    return inv
-
-
-def _quat_multiply(q1: NDArray[np.float64], q2: NDArray[np.float64]) -> NDArray[np.float64]:
-    """Hamilton product q1 * q2 for [w, x, y, z] quaternions."""
-    w1, x1, y1, z1 = q1
-    w2, x2, y2, z2 = q2
-    return np.array([
-        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
-        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
-        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
-        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
-    ], dtype=np.float64)
 
 
 # ---------------------------------------------------------------------------
@@ -163,8 +107,10 @@ class SimulatedIMU:
 
         # -- Angular velocity via quaternion delta -------------------------
         # q_delta = q_current * q_prev_inv
-        q_prev_inv = _quat_inverse(self._prev_rotation)
-        q_delta = _quat_multiply(rot, q_prev_inv)
+        # Inverse of a unit quaternion = conjugate
+        q_prev_inv = self._prev_rotation.copy()
+        q_prev_inv[1:] *= -1.0
+        q_delta = quat_multiply(rot, q_prev_inv)
 
         # Ensure positive scalar part for consistent small-angle approx
         if q_delta[0] < 0:

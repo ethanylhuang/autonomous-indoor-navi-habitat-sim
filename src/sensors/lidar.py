@@ -7,14 +7,13 @@ Camera frame convention (habitat-sim): X=right, Y=up, Z=backward
 (camera looks along -Z). Depth image is z-buffer depth (distance along -Z).
 """
 
-import math
 from dataclasses import dataclass
 from typing import List
 
 import numpy as np
 from numpy.typing import NDArray
 
-from src.sensors.imu import quat_to_rotation_matrix
+from src.utils.transforms import focal_length_from_hfov, quat_to_rotation_matrix
 
 
 @dataclass
@@ -48,9 +47,7 @@ def depth_to_point_cloud(
     # Build valid mask: exclude zero, negative, NaN, inf, and beyond max_depth
     valid = np.isfinite(depth) & (depth > 0.0) & (depth <= max_depth)
 
-    # Focal length from HFOV
-    hfov_rad = math.radians(hfov_deg)
-    focal_length = W / (2.0 * math.tan(hfov_rad / 2.0))
+    focal_length = focal_length_from_hfov(hfov_deg, W)
 
     # Center of image
     cx = W / 2.0
@@ -71,7 +68,7 @@ def depth_to_point_cloud(
     z = -d_valid  # camera looks along -Z
 
     points = np.stack([x, y, z], axis=-1).astype(np.float32)
-    return PointCloud(points=points, num_valid=int(points.shape[0]))
+    return PointCloud(points=points, num_valid=points.shape[0])
 
 
 def transform_point_cloud(
@@ -116,4 +113,4 @@ def merge_point_clouds(clouds: List[PointCloud]) -> PointCloud:
         return PointCloud(points=np.empty((0, 3), dtype=np.float32), num_valid=0)
 
     merged = np.concatenate(all_points, axis=0)
-    return PointCloud(points=merged, num_valid=int(merged.shape[0]))
+    return PointCloud(points=merged, num_valid=merged.shape[0])

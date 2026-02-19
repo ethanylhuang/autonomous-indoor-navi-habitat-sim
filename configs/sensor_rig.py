@@ -20,81 +20,58 @@ DEPTH_RESOLUTION: Tuple[int, int] = (480, 640)  # (H, W)
 SEMANTIC_RESOLUTION: Tuple[int, int] = (480, 640)  # match RGB for pixel alignment
 HFOV: int = 90  # degrees
 
+_FORWARD: List[float] = [0.0, 0.0, 0.0]
+_REAR: List[float] = [0.0, math.pi, 0.0]
+
 
 # ---------------------------------------------------------------------------
-# Factory functions
+# Factory
 # ---------------------------------------------------------------------------
+
+def _make_spec(
+    uuid: str,
+    sensor_type: SensorType,
+    orientation: List[float],
+    resolution: Tuple[int, int],
+) -> habitat_sim.CameraSensorSpec:
+    spec = habitat_sim.CameraSensorSpec()
+    spec.uuid = uuid
+    spec.sensor_type = sensor_type
+    spec.resolution = list(resolution)
+    spec.position = [0.0, SENSOR_HEIGHT, 0.0]
+    spec.orientation = orientation
+    spec.hfov = HFOV
+    return spec
+
 
 def forward_rgb_spec() -> habitat_sim.CameraSensorSpec:
     """Forward-facing RGB camera."""
-    spec = habitat_sim.CameraSensorSpec()
-    spec.uuid = "forward_rgb"
-    spec.sensor_type = SensorType.COLOR
-    spec.resolution = list(RGB_RESOLUTION)
-    spec.position = [0.0, SENSOR_HEIGHT, 0.0]
-    spec.orientation = [0.0, 0.0, 0.0]
-    spec.hfov = HFOV
-    return spec
+    return _make_spec("forward_rgb", SensorType.COLOR, _FORWARD, RGB_RESOLUTION)
 
 
 def rear_rgb_spec() -> habitat_sim.CameraSensorSpec:
     """Rear-facing RGB camera (rotated 180 degrees about Y)."""
-    spec = habitat_sim.CameraSensorSpec()
-    spec.uuid = "rear_rgb"
-    spec.sensor_type = SensorType.COLOR
-    spec.resolution = list(RGB_RESOLUTION)
-    spec.position = [0.0, SENSOR_HEIGHT, 0.0]
-    spec.orientation = [0.0, math.pi, 0.0]
-    spec.hfov = HFOV
-    return spec
+    return _make_spec("rear_rgb", SensorType.COLOR, _REAR, RGB_RESOLUTION)
 
 
 def depth_spec() -> habitat_sim.CameraSensorSpec:
     """Forward-facing depth sensor, co-located with forward_rgb."""
-    spec = habitat_sim.CameraSensorSpec()
-    spec.uuid = "depth"
-    spec.sensor_type = SensorType.DEPTH
-    spec.resolution = list(DEPTH_RESOLUTION)
-    spec.position = [0.0, SENSOR_HEIGHT, 0.0]
-    spec.orientation = [0.0, 0.0, 0.0]
-    spec.hfov = HFOV
-    return spec
+    return _make_spec("depth", SensorType.DEPTH, _FORWARD, DEPTH_RESOLUTION)
 
 
 def rear_depth_spec() -> habitat_sim.CameraSensorSpec:
     """Rear-facing depth sensor, co-located with rear_rgb."""
-    spec = habitat_sim.CameraSensorSpec()
-    spec.uuid = "rear_depth"
-    spec.sensor_type = SensorType.DEPTH
-    spec.resolution = list(DEPTH_RESOLUTION)
-    spec.position = [0.0, SENSOR_HEIGHT, 0.0]
-    spec.orientation = [0.0, math.pi, 0.0]
-    spec.hfov = HFOV
-    return spec
+    return _make_spec("rear_depth", SensorType.DEPTH, _REAR, DEPTH_RESOLUTION)
 
 
 def forward_semantic_spec() -> habitat_sim.CameraSensorSpec:
     """Forward-facing semantic sensor, co-located with forward_rgb."""
-    spec = habitat_sim.CameraSensorSpec()
-    spec.uuid = "forward_semantic"
-    spec.sensor_type = SensorType.SEMANTIC
-    spec.resolution = list(SEMANTIC_RESOLUTION)
-    spec.position = [0.0, SENSOR_HEIGHT, 0.0]
-    spec.orientation = [0.0, 0.0, 0.0]
-    spec.hfov = HFOV
-    return spec
+    return _make_spec("forward_semantic", SensorType.SEMANTIC, _FORWARD, SEMANTIC_RESOLUTION)
 
 
 def rear_semantic_spec() -> habitat_sim.CameraSensorSpec:
     """Rear-facing semantic sensor, co-located with rear_rgb."""
-    spec = habitat_sim.CameraSensorSpec()
-    spec.uuid = "rear_semantic"
-    spec.sensor_type = SensorType.SEMANTIC
-    spec.resolution = list(SEMANTIC_RESOLUTION)
-    spec.position = [0.0, SENSOR_HEIGHT, 0.0]
-    spec.orientation = [0.0, math.pi, 0.0]
-    spec.hfov = HFOV
-    return spec
+    return _make_spec("rear_semantic", SensorType.SEMANTIC, _REAR, SEMANTIC_RESOLUTION)
 
 
 def all_sensor_specs() -> List[habitat_sim.CameraSensorSpec]:

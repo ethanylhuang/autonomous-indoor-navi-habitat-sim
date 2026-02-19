@@ -7,7 +7,6 @@ agent control. Single-client, request/response pattern.
 import base64
 import json
 import logging
-import math
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
@@ -19,7 +18,6 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from configs.sensor_rig import HFOV
-from src.sensors.imu import quat_to_rotation_matrix
 from src.sensors.lidar import (
     PointCloud,
     depth_to_point_cloud,
@@ -56,9 +54,7 @@ _vo_positions: List[NDArray[np.float64]] = []
 
 def _compute_rear_rotation(agent_rotation: NDArray[np.float64]) -> NDArray[np.float64]:
     """Compute rear sensor world rotation: agent rotation * 180-degree Y offset."""
-    # 180-degree rotation about Y axis: quat = [0, 0, 1, 0] (w=0, x=0, y=1, z=0)
-    # Actually: cos(pi/2) = 0, sin(pi/2) = 1, so q_180_y = [0, 0, 1, 0]
-    from src.sensors.imu import quat_multiply
+    from src.utils.transforms import quat_multiply
     q_180_y = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float64)
     return quat_multiply(agent_rotation, q_180_y)
 
