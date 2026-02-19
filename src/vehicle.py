@@ -162,6 +162,28 @@ class Vehicle:
         self._step_count = 0
         return self.get_initial_observations()
 
+    def set_agent_state(
+        self,
+        position: NDArray,
+        rotation: NDArray,
+    ) -> None:
+        """Set the agent to a specific position and rotation.
+
+        Args:
+            position: [3] world-frame position.
+            rotation: [4] quaternion [w, x, y, z].
+        """
+        import quaternion as qt
+
+        agent_state = self._agent.get_state()
+        pos = np.asarray(position, dtype=np.float32)
+        rot = np.asarray(rotation, dtype=np.float64)
+        agent_state.position = pos
+        agent_state.rotation = qt.quaternion(rot[0], rot[1], rot[2], rot[3])
+        self._agent.set_state(agent_state)
+        self._imu.reset()
+        self._step_count = 0
+
     def close(self) -> None:
         """Release simulator resources."""
         if self._sim is not None:
