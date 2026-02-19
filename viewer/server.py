@@ -10,6 +10,7 @@ WebSocket message types.
 import base64
 import json
 import logging
+import math
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
@@ -47,7 +48,7 @@ from src.control.controller import NavigationController, NavigationStatus
 from src.planning.global_planner import GlobalPlanner
 from src.planning.local_planner import LocalPlanner
 from src.state_estimation.estimator import EKFEstimator
-from src.utils.transforms import yaw_from_quaternion
+from src.utils.transforms import normalize_angle, yaw_from_quaternion
 
 logger = logging.getLogger(__name__)
 
@@ -334,11 +335,34 @@ def _start_autonomous_nav(goal: Optional[NDArray[np.float64]] = None) -> dict:
     )
 
     _nav_traveled_path.append(start_pos.copy())
+
+    # Align vehicle heading toward first waypoint before starting nav loop.
+    # Compute desired yaw, then issue turn actions to align.
+    if global_path.waypoints and len(global_path.waypoints) > 1:
+        first_wp = global_path.waypoints[1]  # skip start point
+    else:
+        first_wp = goal
+    dx = first_wp[0] - start_pos[0]
+    dz = first_wp[2] - start_pos[2]
+    desired_yaw = math.atan2(-dx, -dz)  # habitat-sim convention
+    yaw_diff = normalize_angle(desired_yaw - start_yaw)
+    num_turns = int(round(abs(yaw_diff) / math.radians(10.0)))
+    turn_action = "turn_left" if yaw_diff > 0 else "turn_right"
+    for _ in range(num_turns):
+        _nav_obs = _vehicle.step(turn_action)
+
+    # Re-read state after alignment turns
+    aligned_pos = _nav_obs.state.position.copy()
+    aligned_rot = _nav_obs.state.rotation.copy()
+    aligned_yaw = yaw_from_quaternion(aligned_rot)
+    _nav_estimator.initialize(aligned_pos, aligned_yaw)
+
     _nav_mode = "autonomous"
 
     logger.info(
-        "Autonomous nav started: goal=[%.2f, %.2f, %.2f], geodesic=%.2f",
-        goal[0], goal[1], goal[2], global_path.geodesic_distance,
+        "Autonomous nav started: goal=[%.2f, %.2f, %.2f], geodesic=%.2f, "
+        "aligned %d turns",
+        goal[0], goal[1], goal[2], global_path.geodesic_distance, num_turns,
     )
     return {"status": "started", "goal": goal.tolist()}
 

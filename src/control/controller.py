@@ -5,9 +5,10 @@ produce the next action. Handles goal detection, stuck detection, and
 replanning triggers. Also computes episode metrics (SPL, path length, etc.).
 """
 
+import math
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 import numpy as np
 from numpy.typing import NDArray
@@ -16,6 +17,7 @@ from src.perception.occupancy_grid import OccupancyGridData
 from src.planning.global_planner import GlobalPath, GlobalPlanner
 from src.planning.local_planner import LocalPlanner, LocalPlanResult
 from src.state_estimation.estimator import PoseEstimate
+from src.utils.transforms import normalize_angle
 
 
 @dataclass
@@ -81,6 +83,12 @@ class NavigationController:
         self._termination_reason: Optional[str] = None
         self._vehicle_find_path: Optional[Callable] = None
 
+        # Escape state: queued actions when stuck
+        self._escape_queue: List[str] = []
+        self._escape_turn_deg: float = 30.0  # larger turns for escape
+        self._escape_attempts: int = 0
+        self._max_escape_attempts: int = 4
+
     def start_episode(
         self,
         start_position: NDArray[np.float64],
@@ -110,6 +118,8 @@ class NavigationController:
         self._goal_reached = False
         self._termination_reason = None
         self._vehicle_find_path = vehicle_find_path
+        self._escape_queue.clear()
+        self._escape_attempts = 0
 
     def step(
         self,
@@ -178,19 +188,55 @@ class NavigationController:
                 path_length=self._path_length,
             )
 
-        # 3. Check stuck condition (skip when close to goal — fine adjustments
+        # 3. Drain escape queue if active (bypasses normal planning)
+        if self._escape_queue:
+            action = self._escape_queue.pop(0)
+            # When queue empties, replan from new position and reset history
+            if not self._escape_queue and self._vehicle_find_path is not None:
+                self._global_planner.replan(
+                    self._vehicle_find_path, current_pos, self._goal,
+                )
+                self._position_history.clear()
+                self._position_history.append(current_pos.copy())
+            return NavigationStatus(
+                action=action,
+                goal_reached=False,
+                is_stuck=False,
+                needs_replan=not self._escape_queue,
+                distance_to_goal=distance_to_goal,
+                heading_error=0.0,
+                steps_taken=self._steps_taken,
+                total_collisions=self._total_collisions,
+                path_length=self._path_length,
+            )
+
+        # 4. Check stuck condition (skip when close to goal — fine adjustments
         #    near the goal look like "stuck" but are normal approach behavior)
         near_goal = distance_to_goal < self._goal_threshold * 2.0
         is_stuck = not near_goal and self._check_stuck()
         if is_stuck:
-            if self._replan_count < self._max_replan_attempts and self._vehicle_find_path is not None:
-                # Attempt replan
-                self._global_planner.replan(
-                    self._vehicle_find_path, current_pos, self._goal,
+            if self._escape_attempts < self._max_escape_attempts:
+                # Generate escape: large turns toward goal + forward steps
+                escape_actions = self._generate_escape(
+                    pose_estimate.yaw, current_pos,
                 )
-                self._replan_count += 1
+                self._escape_queue = escape_actions
+                self._escape_attempts += 1
                 self._position_history.clear()
                 self._position_history.append(current_pos.copy())
+                # Execute first escape action immediately
+                action = self._escape_queue.pop(0)
+                return NavigationStatus(
+                    action=action,
+                    goal_reached=False,
+                    is_stuck=True,
+                    needs_replan=True,
+                    distance_to_goal=distance_to_goal,
+                    heading_error=0.0,
+                    steps_taken=self._steps_taken,
+                    total_collisions=self._total_collisions,
+                    path_length=self._path_length,
+                )
             else:
                 self._termination_reason = "stuck"
                 return NavigationStatus(
@@ -205,15 +251,22 @@ class NavigationController:
                     path_length=self._path_length,
                 )
 
-        # 4. Advance global waypoint
+        # 5. Making progress — reset escape counter
+        if not is_stuck and self._escape_attempts > 0:
+            step_dist_check = float(np.linalg.norm(
+                current_pos - self._position_history[0]
+            )) if len(self._position_history) > 1 else 0.0
+            if step_dist_check > self._stuck_displacement:
+                self._escape_attempts = 0
+
+        # 6. Advance global waypoint
         self._global_planner.advance_waypoint(current_pos)
         waypoint = self._global_planner.get_current_waypoint()
 
         if waypoint is None:
-            # All waypoints consumed but goal not yet reached, use goal directly
             waypoint = self._goal
 
-        # 5. Run local planner
+        # 7. Run local planner
         local_result = self._local_planner.plan(
             current_pos,
             pose_estimate.yaw,
@@ -222,7 +275,7 @@ class NavigationController:
             rear_obstacle_detected,
         )
 
-        # 6. If blocked, trigger replan
+        # 8. If blocked, trigger replan
         needs_replan = False
         if local_result.is_blocked:
             needs_replan = True
@@ -267,6 +320,41 @@ class NavigationController:
             termination_reason=reason,
         )
 
+    def _generate_escape(
+        self,
+        current_yaw: float,
+        current_pos: NDArray[np.float64],
+    ) -> List[str]:
+        """Generate escape action sequence using larger turns.
+
+        Computes desired yaw toward goal, then generates turn actions
+        using escape_turn_deg (larger than normal 10 deg) to break free
+        from furniture. Alternates direction on successive attempts.
+        """
+        # Target direction: toward the goal
+        dx = self._goal[0] - current_pos[0]
+        dz = self._goal[2] - current_pos[2]
+        goal_yaw = math.atan2(-dx, -dz)
+
+        # On even attempts, head toward goal. On odd attempts, offset by 90 deg
+        # to try a different escape direction.
+        if self._escape_attempts % 2 == 1:
+            goal_yaw = normalize_angle(goal_yaw + math.pi / 2.0)
+
+        delta = normalize_angle(goal_yaw - current_yaw)
+        turn_rad = math.radians(self._escape_turn_deg)
+        num_turns = max(1, int(round(abs(delta) / turn_rad)))
+        num_turns = min(num_turns, 6)  # cap at 180 deg
+
+        if delta >= 0:
+            actions: List[str] = ["turn_left"] * num_turns
+        else:
+            actions = ["turn_right"] * num_turns
+
+        # Add forward steps to physically move out of the stuck spot
+        actions.extend(["move_forward"] * 3)
+        return actions
+
     def _check_stuck(self) -> bool:
         """Check if agent has moved less than stuck_displacement
         over the last stuck_window steps."""
@@ -296,6 +384,8 @@ class NavigationController:
         self._goal_reached = False
         self._termination_reason = None
         self._vehicle_find_path = None
+        self._escape_queue.clear()
+        self._escape_attempts = 0
 
 
 def _xz_distance(a: NDArray[np.float64], b: NDArray[np.float64]) -> float:
