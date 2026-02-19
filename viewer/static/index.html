@@ -246,12 +246,49 @@
         </div>
     </div>
 
+    <!-- M3 Navigation Control Panel -->
+    <div class="bottom-row">
+        <div class="panel">
+            <div class="panel-title">Navigation Control</div>
+            <div style="padding: 12px;">
+                <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                    <button id="startNavBtn" style="padding: 6px 16px; background: #1b5e20; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 13px;">Start Nav</button>
+                    <button id="stopNavBtn" style="padding: 6px 16px; background: #b71c1c; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 13px;" disabled>Stop Nav</button>
+                    <span id="navModeLabel" style="font-size: 14px; color: #a0a0b0; padding: 6px 0;">Mode: <strong id="navModeValue" style="color: #e0e0e0;">Manual</strong></span>
+                </div>
+                <div id="navResult" style="display: none; padding: 6px; border-radius: 4px; margin-top: 4px; font-size: 13px;"></div>
+            </div>
+        </div>
+        <div class="panel">
+            <div class="panel-title">Navigation Status</div>
+            <div class="state-grid">
+                <span class="label">Goal:</span>
+                <span class="value" id="navGoal">--</span>
+                <span class="label">Distance:</span>
+                <span class="value" id="navDistance">--</span>
+                <span class="label">Heading Err:</span>
+                <span class="value" id="navHeading">--</span>
+                <span class="label">Nav Steps:</span>
+                <span class="value" id="navSteps">--</span>
+                <span class="label">Nav Collisions:</span>
+                <span class="value" id="navCollisions">--</span>
+                <span class="label">Path Length:</span>
+                <span class="value" id="navPathLength">--</span>
+                <span class="label">SPL:</span>
+                <span class="value" id="navSPL">--</span>
+                <span class="label">Action:</span>
+                <span class="value" id="navAction">--</span>
+            </div>
+        </div>
+    </div>
+
     <div class="controls">
         Controls:
         <kbd>W</kbd> Forward |
         <kbd>A</kbd> Turn Left |
         <kbd>D</kbd> Turn Right |
         <kbd>R</kbd> Reset
+        <span id="controlsDisabledHint" style="display: none; color: #e94560; margin-left: 8px;">(WASD disabled during autonomous nav)</span>
     </div>
 
     <script src="/static/app.js"></script>

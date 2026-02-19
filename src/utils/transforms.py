@@ -47,6 +47,30 @@ def quat_to_rotation_matrix(q: NDArray[np.float64]) -> NDArray[np.float64]:
     ], dtype=np.float64)
 
 
+def quaternion_from_yaw(yaw: float) -> NDArray[np.float64]:
+    """Create a Y-axis rotation quaternion [w, x, y, z] from yaw angle.
+
+    Args:
+        yaw: Rotation about Y axis in radians.
+
+    Returns:
+        [4] quaternion [w, x, y, z].
+    """
+    return np.array([
+        math.cos(yaw / 2.0),
+        0.0,
+        math.sin(yaw / 2.0),
+        0.0,
+    ], dtype=np.float64)
+
+
+def normalize_angle(angle: float) -> float:
+    """Normalize angle to [-pi, pi]. NaN-safe and O(1)."""
+    if math.isnan(angle):
+        return 0.0
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
 def quat_multiply(q1: NDArray[np.float64], q2: NDArray[np.float64]) -> NDArray[np.float64]:
     """Hamilton product q1 * q2 for [w, x, y, z] quaternions."""
     w1, x1, y1, z1 = q1

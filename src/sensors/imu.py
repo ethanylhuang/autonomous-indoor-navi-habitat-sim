@@ -24,6 +24,7 @@ from src.utils.transforms import quat_multiply, quat_to_rotation_matrix
 class IMUReading:
     linear_acceleration: NDArray[np.float64]  # [3] m/s^2, world frame
     angular_velocity: NDArray[np.float64]  # [3] rad/s, world frame
+    linear_velocity: NDArray[np.float64]  # [3] m/s, world frame
     timestamp_step: int  # sim step count
 
     def to_body_frame(self, rotation_quat: NDArray[np.float64]) -> "IMUReading":
@@ -43,6 +44,7 @@ class IMUReading:
         return IMUReading(
             linear_acceleration=R_inv @ self.linear_acceleration,
             angular_velocity=R_inv @ self.angular_velocity,
+            linear_velocity=R_inv @ self.linear_velocity,
             timestamp_step=self.timestamp_step,
         )
 
@@ -98,6 +100,7 @@ class SimulatedIMU:
             return IMUReading(
                 linear_acceleration=np.zeros(3, dtype=np.float64),
                 angular_velocity=np.zeros(3, dtype=np.float64),
+                linear_velocity=np.zeros(3, dtype=np.float64),
                 timestamp_step=self._step,
             )
 
@@ -127,6 +130,7 @@ class SimulatedIMU:
         return IMUReading(
             linear_acceleration=acceleration,
             angular_velocity=angular_velocity,
+            linear_velocity=velocity.copy(),
             timestamp_step=self._step,
         )
 

@@ -23,6 +23,7 @@ class TestSimulatedIMUUnit:
         reading = imu.update(pos, rot)
         np.testing.assert_array_equal(reading.linear_acceleration, np.zeros(3))
         np.testing.assert_array_equal(reading.angular_velocity, np.zeros(3))
+        np.testing.assert_array_equal(reading.linear_velocity, np.zeros(3))
 
     def test_constant_velocity_zero_acceleration(self):
         """Moving at constant velocity should yield zero acceleration after warm-up."""
@@ -35,6 +36,14 @@ class TestSimulatedIMUUnit:
         # Step 3: moved another 1m in X -> velocity = [1, 0, 0], accel = [0, 0, 0]
         reading = imu.update(np.array([2.0, 0.0, 0.0]), rot)
         np.testing.assert_allclose(reading.linear_acceleration, np.zeros(3), atol=1e-10)
+
+    def test_linear_velocity_tracks_motion(self):
+        """linear_velocity should reflect position differencing."""
+        imu = SimulatedIMU(dt=1.0)
+        rot = np.array([1.0, 0.0, 0.0, 0.0])
+        imu.update(np.array([0.0, 0.0, 0.0]), rot)
+        reading = imu.update(np.array([0.25, 0.0, -0.5]), rot)
+        np.testing.assert_allclose(reading.linear_velocity, [0.25, 0.0, -0.5], atol=1e-10)
 
     def test_acceleration_on_velocity_change(self):
         """Changing velocity produces non-zero acceleration."""
@@ -71,6 +80,7 @@ class TestSimulatedIMUUnit:
         reading = imu.update(np.array([0.0, 0.0, 0.0]), rot)
         np.testing.assert_array_equal(reading.linear_acceleration, np.zeros(3))
         np.testing.assert_array_equal(reading.angular_velocity, np.zeros(3))
+        np.testing.assert_array_equal(reading.linear_velocity, np.zeros(3))
         assert reading.timestamp_step == 1
 
     def test_dtype_and_shape(self):
@@ -78,8 +88,10 @@ class TestSimulatedIMUUnit:
         reading = imu.update(np.array([0.0, 0.0, 0.0]), np.array([1.0, 0.0, 0.0, 0.0]))
         assert reading.linear_acceleration.dtype == np.float64
         assert reading.angular_velocity.dtype == np.float64
+        assert reading.linear_velocity.dtype == np.float64
         assert reading.linear_acceleration.shape == (3,)
         assert reading.angular_velocity.shape == (3,)
+        assert reading.linear_velocity.shape == (3,)
 
 
 # ---------------------------------------------------------------------------
