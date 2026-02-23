@@ -253,6 +253,11 @@ def _build_frame(obs, nav_status_dict: Optional[dict] = None) -> dict:
             "angular_velocity": obs.imu.angular_velocity.tolist(),
             "timestamp_step": obs.imu.timestamp_step,
         },
+        # NavMesh bounds for client-side pixel-to-world conversion
+        "navmesh_bounds": {
+            "lower": list(_navmesh_bounds[0]) if _navmesh_bounds else [0, 0, 0],
+            "upper": list(_navmesh_bounds[1]) if _navmesh_bounds else [1, 1, 1],
+        },
         # M2 stats
         "m2_stats": {
             "vo_inliers": vo_estimate.num_inliers,

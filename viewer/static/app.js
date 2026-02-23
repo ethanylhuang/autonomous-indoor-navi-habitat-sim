@@ -43,6 +43,7 @@
     var rearObstaclePxEl = document.getElementById("rearObstaclePx");
     // M3 DOM references
     var startNavBtn = document.getElementById("startNavBtn");
+    var startNavToBtn = document.getElementById("startNavToBtn");
     var stopNavBtn = document.getElementById("stopNavBtn");
     var navModeValue = document.getElementById("navModeValue");
     var navResult = document.getElementById("navResult");
@@ -55,6 +56,9 @@
     var navSPL = document.getElementById("navSPL");
     var navAction = document.getElementById("navAction");
     var controlsDisabledHint = document.getElementById("controlsDisabledHint");
+    var goalPin = document.getElementById("goalPin");
+    var pinnedGoalLabel = document.getElementById("pinnedGoalLabel");
+    var pinnedGoalCoords = document.getElementById("pinnedGoalCoords");
 
     // -- Key mappings -----------------------------------------------------
     var KEY_MAP = {
@@ -71,6 +75,9 @@
     var waitingForResponse = false;
     var navMode = "manual"; // "manual" or "autonomous"
     var tickTimer = null;
+    var navmeshBounds = null; // {lower: [x,y,z], upper: [x,y,z]}
+    var pinnedGoal = null; // [x, y, z] world coords, or null
+    var agentY = 0; // current agent Y for goal height
 
     // -- Formatting helper ------------------------------------------------
     function fmt(val) {
@@ -95,8 +102,14 @@
         depthImg.src = "data:image/jpeg;base64," + data.depth;
         topdownImg.src = "data:image/png;base64," + data.topdown;
 
+        // Track navmesh bounds for click-to-goal
+        if (data.navmesh_bounds) {
+            navmeshBounds = data.navmesh_bounds;
+        }
+
         // Update state display
         var st = data.state;
+        agentY = st.position[1];
         stepCountEl.textContent = st.step_count;
         collidedEl.textContent = st.collided ? "Yes" : "No";
         posX.textContent = fmt(st.position[0]);
@@ -202,11 +215,13 @@
         navMode = mode;
         if (mode === "autonomous") {
             startNavBtn.disabled = true;
+            startNavToBtn.disabled = true;
             stopNavBtn.disabled = false;
             controlsDisabledHint.style.display = "inline";
             navModeValue.textContent = "Autonomous";
         } else {
             startNavBtn.disabled = false;
+            startNavToBtn.disabled = !pinnedGoal;
             stopNavBtn.disabled = true;
             controlsDisabledHint.style.display = "none";
             navModeValue.textContent = "Manual";
@@ -277,6 +292,11 @@
         }
         waitingForResponse = true;
         setNavMode("manual");
+        // Clear pin
+        pinnedGoal = null;
+        goalPin.style.display = "none";
+        pinnedGoalLabel.style.display = "none";
+        startNavToBtn.disabled = true;
         ws.send(JSON.stringify({ type: "reset" }));
     }
 
@@ -307,6 +327,46 @@
         waitingForResponse = true;
         ws.send(JSON.stringify({ type: "tick" }));
     }
+
+    function sendStartNavTo(goal) {
+        if (!ws || ws.readyState !== WebSocket.OPEN || waitingForResponse) {
+            return;
+        }
+        waitingForResponse = true;
+        navResult.style.display = "none";
+        setNavMode("autonomous");
+        ws.send(JSON.stringify({ type: "start_nav_to", goal: goal }));
+    }
+
+    // -- NavMesh click-to-pin handler ------------------------------------
+    topdownImg.addEventListener("click", function (e) {
+        if (navMode === "autonomous") return;
+        if (!navmeshBounds) return;
+
+        var rect = topdownImg.getBoundingClientRect();
+        var fracX = (e.clientX - rect.left) / rect.width;
+        var fracY = (e.clientY - rect.top) / rect.height;
+
+        // Convert pixel fraction to world XZ
+        var lower = navmeshBounds.lower;
+        var upper = navmeshBounds.upper;
+        var worldX = lower[0] + fracX * (upper[0] - lower[0]);
+        var worldZ = lower[2] + fracY * (upper[2] - lower[2]);
+
+        pinnedGoal = [worldX, agentY, worldZ];
+
+        // Show pin overlay
+        goalPin.style.display = "block";
+        goalPin.style.left = (fracX * 100) + "%";
+        goalPin.style.top = (fracY * 100) + "%";
+
+        // Update label
+        pinnedGoalLabel.style.display = "block";
+        pinnedGoalCoords.textContent = "[" + worldX.toFixed(2) + ", " + agentY.toFixed(2) + ", " + worldZ.toFixed(2) + "]";
+
+        // Enable "Nav to Pin" button
+        startNavToBtn.disabled = false;
+    });
 
     // -- Keyboard handler -------------------------------------------------
     document.addEventListener("keydown", function (e) {
@@ -340,6 +400,12 @@
 
     startNavBtn.addEventListener("click", function () {
         sendStartNav();
+    });
+
+    startNavToBtn.addEventListener("click", function () {
+        if (pinnedGoal) {
+            sendStartNavTo(pinnedGoal);
+        }
     });
 
     stopNavBtn.addEventListener("click", function () {

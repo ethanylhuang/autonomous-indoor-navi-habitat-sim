@@ -174,27 +174,68 @@
         </div>
     </div>
 
-    <div class="bottom-row">
+    <!-- M3 Navigation Control + NavMesh (merged) -->
+    <div class="bottom-row" style="grid-template-columns: 400px 1fr 1fr;">
         <div class="panel">
-            <div class="panel-title">Top-Down NavMesh</div>
-            <img id="topdown" alt="Top-Down View">
+            <div class="panel-title">NavMesh — Click to Set Goal</div>
+            <div style="position: relative; cursor: crosshair;">
+                <img id="topdown" alt="Top-Down View" style="display: block; width: 100%;">
+                <div id="goalPin" style="display: none; position: absolute; width: 12px; height: 12px; border: 2px solid #00ff00; border-radius: 50%; background: rgba(0,255,0,0.4); transform: translate(-50%, -50%); pointer-events: none;"></div>
+            </div>
         </div>
         <div class="panel">
-            <div class="panel-title">Agent State</div>
+            <div class="panel-title">Navigation Control</div>
+            <div style="padding: 12px;">
+                <div style="display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;">
+                    <button id="startNavBtn" style="padding: 6px 16px; background: #1b5e20; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 13px;">Random Goal</button>
+                    <button id="startNavToBtn" style="padding: 6px 16px; background: #0f3460; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 13px;" disabled>Nav to Pin</button>
+                    <button id="stopNavBtn" style="padding: 6px 16px; background: #b71c1c; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 13px;" disabled>Stop</button>
+                </div>
+                <div style="font-size: 13px; color: #a0a0b0; margin-bottom: 4px;">Mode: <strong id="navModeValue" style="color: #e0e0e0;">Manual</strong></div>
+                <div id="pinnedGoalLabel" style="display: none; font-size: 12px; color: #a0a0b0; margin-bottom: 4px;">Pin: <span id="pinnedGoalCoords" style="color: #00ff88;">--</span></div>
+                <div id="navResult" style="display: none; padding: 6px; border-radius: 4px; margin-top: 4px; font-size: 13px;"></div>
+            </div>
+        </div>
+        <div class="panel">
+            <div class="panel-title">Navigation Status</div>
             <div class="state-grid">
-                <span class="label">Position X:</span>
+                <span class="label">Goal:</span>
+                <span class="value" id="navGoal">--</span>
+                <span class="label">Distance:</span>
+                <span class="value" id="navDistance">--</span>
+                <span class="label">Heading Err:</span>
+                <span class="value" id="navHeading">--</span>
+                <span class="label">Nav Steps:</span>
+                <span class="value" id="navSteps">--</span>
+                <span class="label">Nav Collisions:</span>
+                <span class="value" id="navCollisions">--</span>
+                <span class="label">Path Length:</span>
+                <span class="value" id="navPathLength">--</span>
+                <span class="label">SPL:</span>
+                <span class="value" id="navSPL">--</span>
+                <span class="label">Action:</span>
+                <span class="value" id="navAction">--</span>
+            </div>
+        </div>
+    </div>
+
+    <div style="padding: 0 24px 8px;">
+        <div class="panel">
+            <div class="panel-title">Agent State</div>
+            <div class="state-grid" style="grid-template-columns: repeat(5, auto auto); gap: 4px 12px;">
+                <span class="label">Pos X:</span>
                 <span class="value" id="posX">--</span>
-                <span class="label">Position Y:</span>
+                <span class="label">Pos Y:</span>
                 <span class="value" id="posY">--</span>
-                <span class="label">Position Z:</span>
+                <span class="label">Pos Z:</span>
                 <span class="value" id="posZ">--</span>
-                <span class="label">Rotation W:</span>
+                <span class="label">Rot W:</span>
                 <span class="value" id="rotW">--</span>
-                <span class="label">Rotation X:</span>
+                <span class="label">Rot X:</span>
                 <span class="value" id="rotX">--</span>
-                <span class="label">Rotation Y:</span>
+                <span class="label">Rot Y:</span>
                 <span class="value" id="rotY">--</span>
-                <span class="label">Rotation Z:</span>
+                <span class="label">Rot Z:</span>
                 <span class="value" id="rotZ">--</span>
                 <span class="label">IMU Accel:</span>
                 <span class="value" id="imuAccel">--</span>
@@ -242,42 +283,6 @@
                 <span class="value" id="fwdObstaclePx">--</span>
                 <span class="label">Rear Obstacle Px:</span>
                 <span class="value" id="rearObstaclePx">--</span>
-            </div>
-        </div>
-    </div>
-
-    <!-- M3 Navigation Control Panel -->
-    <div class="bottom-row">
-        <div class="panel">
-            <div class="panel-title">Navigation Control</div>
-            <div style="padding: 12px;">
-                <div style="display: flex; gap: 8px; margin-bottom: 8px;">
-                    <button id="startNavBtn" style="padding: 6px 16px; background: #1b5e20; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 13px;">Start Nav</button>
-                    <button id="stopNavBtn" style="padding: 6px 16px; background: #b71c1c; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 13px;" disabled>Stop Nav</button>
-                    <span id="navModeLabel" style="font-size: 14px; color: #a0a0b0; padding: 6px 0;">Mode: <strong id="navModeValue" style="color: #e0e0e0;">Manual</strong></span>
-                </div>
-                <div id="navResult" style="display: none; padding: 6px; border-radius: 4px; margin-top: 4px; font-size: 13px;"></div>
-            </div>
-        </div>
-        <div class="panel">
-            <div class="panel-title">Navigation Status</div>
-            <div class="state-grid">
-                <span class="label">Goal:</span>
-                <span class="value" id="navGoal">--</span>
-                <span class="label">Distance:</span>
-                <span class="value" id="navDistance">--</span>
-                <span class="label">Heading Err:</span>
-                <span class="value" id="navHeading">--</span>
-                <span class="label">Nav Steps:</span>
-                <span class="value" id="navSteps">--</span>
-                <span class="label">Nav Collisions:</span>
-                <span class="value" id="navCollisions">--</span>
-                <span class="label">Path Length:</span>
-                <span class="value" id="navPathLength">--</span>
-                <span class="label">SPL:</span>
-                <span class="value" id="navSPL">--</span>
-                <span class="label">Action:</span>
-                <span class="value" id="navAction">--</span>
             </div>
         </div>
     </div>
