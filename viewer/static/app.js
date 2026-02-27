@@ -11,7 +11,10 @@
 (function () {
     "use strict";
 
+    console.log("app.js loaded!");
+
     // -- DOM references ---------------------------------------------------
+    var sceneSelect = document.getElementById("sceneSelect");
     var fwdImg = document.getElementById("fwd");
     var rearImg = document.getElementById("rear");
     var depthImg = document.getElementById("depthImg");
@@ -59,6 +62,30 @@
     var goalPin = document.getElementById("goalPin");
     var pinnedGoalLabel = document.getElementById("pinnedGoalLabel");
     var pinnedGoalCoords = document.getElementById("pinnedGoalCoords");
+    // Projection DOM references
+    var fwdContainer = document.getElementById("fwdContainer");
+    var fwdClickMarker = document.getElementById("fwdClickMarker");
+    var projectedPin = document.getElementById("projectedPin");
+    var projectedLabel = document.getElementById("projectedLabel");
+    var projectedCoords = document.getElementById("projectedCoords");
+    console.log("fwdContainer element:", fwdContainer);
+    // M5 VLM DOM references
+    var vlmInstructionInput = document.getElementById("vlmInstructionInput");
+    var startVlmNavBtn = document.getElementById("startVlmNavBtn");
+    var stopVlmNavBtn = document.getElementById("stopVlmNavBtn");
+    var vlmStatusPanel = document.getElementById("vlmStatusPanel");
+    var vlmInstruction = document.getElementById("vlmInstruction");
+    var vlmSubgoal = document.getElementById("vlmSubgoal");
+    var vlmReasoning = document.getElementById("vlmReasoning");
+    var vlmConfidence = document.getElementById("vlmConfidence");
+    var vlmStepsCalls = document.getElementById("vlmStepsCalls");
+    var vlmResult = document.getElementById("vlmResult");
+    // Semantic object navigation DOM references
+    var semanticObjectSelect = document.getElementById("semanticObjectSelect");
+    var navToObjectBtn = document.getElementById("navToObjectBtn");
+    var objectDetail = document.getElementById("objectDetail");
+    var objectLabel = document.getElementById("objectLabel");
+    var objectPos = document.getElementById("objectPos");
 
     // -- Key mappings -----------------------------------------------------
     var KEY_MAP = {
@@ -73,11 +100,15 @@
     // -- State ------------------------------------------------------------
     var ws = null;
     var waitingForResponse = false;
-    var navMode = "manual"; // "manual" or "autonomous"
+    var navMode = "manual"; // "manual", "autonomous", or "vlm_nav"
     var tickTimer = null;
     var navmeshBounds = null; // {lower: [x,y,z], upper: [x,y,z]}
     var pinnedGoal = null; // [x, y, z] world coords, or null
+    var semanticObjects = {}; // object_id -> object data from API
+    var projectedPoint = null; // [x, y, z] world coords from image click, or null
     var agentY = 0; // current agent Y for goal height
+    var vlmTickTimer = null; // Separate timer for VLM nav
+    var changingScene = false; // True while scene change is in progress
 
     // -- Formatting helper ------------------------------------------------
     function fmt(val) {
@@ -96,6 +127,32 @@
 
     // -- Update UI --------------------------------------------------------
     function updateFrame(data) {
+        // Handle error responses
+        if (data.error) {
+            console.error("Server error:", data.error);
+            showVlmResult(false, "Error: " + data.error);
+            setVlmMode("manual");
+            waitingForResponse = false;
+            changingScene = false;
+            sceneSelect.disabled = false;
+            // Restore dropdown to current scene if scene change failed
+            if (data.current_scene) {
+                sceneSelect.value = data.current_scene;
+            }
+            return;
+        }
+
+        // Handle scene change completion
+        if (data.scene_changed !== undefined) {
+            changingScene = false;
+            sceneSelect.disabled = false;
+            if (data.current_scene) {
+                sceneSelect.value = data.current_scene;
+            }
+            // Refresh semantic objects for new scene
+            fetchSemanticObjects();
+        }
+
         // Update images (base64 -> data URL)
         fwdImg.src = "data:image/jpeg;base64," + data.forward_rgb;
         rearImg.src = "data:image/jpeg;base64," + data.rear_rgb;
@@ -181,10 +238,36 @@
                 setNavMode("manual");
             }
 
-            // Update nav mode from server
-            if (mode !== navMode) {
+            // Update nav mode from server (but not if VLM mode is active)
+            if (mode !== navMode && navMode !== "vlm_nav") {
                 setNavMode(mode);
             }
+        }
+
+        // M5 VLM status - process AFTER nav_status so VLM mode takes precedence
+        if (data.vlm_status) {
+            var vs = data.vlm_status;
+
+            // If server says VLM is active, ensure client is in VLM mode
+            if (vs.mode === "vlm_nav" && navMode !== "vlm_nav") {
+                setVlmMode("vlm_nav");
+            }
+
+            updateVlmStatus(vs);
+
+            // Check for VLM episode completion
+            if (vs.goal_reached) {
+                showVlmResult(true, "Goal reached! Steps: " + vs.steps_taken + ", VLM calls: " + vs.vlm_calls);
+                setVlmMode("manual");
+            } else if (vs.termination_reason && vs.termination_reason !== "goal_reached") {
+                showVlmResult(false, "Ended: " + vs.termination_reason + " (steps: " + vs.steps_taken + ")");
+                setVlmMode("manual");
+            }
+        }
+
+        // Handle projection result
+        if (data.projection_result) {
+            updateProjection(data.projection_result);
         }
 
         waitingForResponse = false;
@@ -192,6 +275,113 @@
         // If in autonomous mode, send next tick
         if (navMode === "autonomous") {
             scheduleNextTick();
+        }
+        // If in VLM nav mode, send next VLM tick
+        if (navMode === "vlm_nav") {
+            scheduleNextVlmTick();
+        }
+    }
+
+    function updateProjection(proj) {
+        console.log("updateProjection:", proj);
+        if (proj.is_valid && proj.navmesh_point && navmeshBounds) {
+            projectedPoint = proj.navmesh_point;
+
+            // Calculate position on topdown view
+            var lower = navmeshBounds.lower;
+            var upper = navmeshBounds.upper;
+            var fracX = (proj.navmesh_point[0] - lower[0]) / (upper[0] - lower[0]);
+            var fracY = (proj.navmesh_point[2] - lower[2]) / (upper[2] - lower[2]);
+
+            // Show projected pin on navmesh
+            projectedPin.style.display = "block";
+            projectedPin.style.left = (fracX * 100) + "%";
+            projectedPin.style.top = (fracY * 100) + "%";
+
+            // Update label
+            projectedLabel.style.display = "block";
+            var coordStr = "[" + proj.navmesh_point[0].toFixed(2) + ", " +
+                           proj.navmesh_point[1].toFixed(2) + ", " +
+                           proj.navmesh_point[2].toFixed(2) + "]";
+            if (proj.depth_value) {
+                coordStr += " (d=" + proj.depth_value.toFixed(2) + "m)";
+            }
+            projectedCoords.textContent = coordStr;
+        } else {
+            // Invalid projection - show error
+            projectedLabel.style.display = "block";
+            projectedCoords.textContent = proj.failure_reason || "invalid";
+            projectedCoords.style.color = "#ff6666";
+            setTimeout(function() {
+                projectedCoords.style.color = "#00ffff";
+            }, 2000);
+        }
+    }
+
+    function updateVlmStatus(vs) {
+        if (vs.mode === "vlm_nav") {
+            vlmStatusPanel.style.display = "block";
+            vlmInstruction.textContent = vs.instruction || "--";
+            vlmSubgoal.textContent = vs.subgoal || "--";
+            vlmReasoning.textContent = vs.last_vlm_reasoning || "--";
+            vlmConfidence.textContent = vs.confidence != null ? (vs.confidence * 100).toFixed(0) + "%" : "--";
+            vlmStepsCalls.textContent = (vs.steps_taken || 0) + " / " + (vs.vlm_calls || 0);
+        } else {
+            vlmStatusPanel.style.display = "none";
+        }
+    }
+
+    function showVlmResult(success, message) {
+        vlmResult.style.display = "block";
+        vlmResult.textContent = message;
+        if (success) {
+            vlmResult.style.background = "#1b5e20";
+            vlmResult.style.color = "#a5d6a7";
+        } else {
+            vlmResult.style.background = "#b71c1c";
+            vlmResult.style.color = "#ef9a9a";
+        }
+        setTimeout(function () {
+            vlmResult.style.display = "none";
+        }, 10000);
+    }
+
+    function setVlmMode(mode) {
+        if (mode === "vlm_nav") {
+            navMode = "vlm_nav";
+            startVlmNavBtn.disabled = true;
+            stopVlmNavBtn.disabled = false;
+            vlmInstructionInput.disabled = true;
+            // Also disable M3 nav buttons
+            startNavBtn.disabled = true;
+            startNavToBtn.disabled = true;
+            controlsDisabledHint.style.display = "inline";
+        } else {
+            navMode = "manual";
+            startVlmNavBtn.disabled = false;
+            stopVlmNavBtn.disabled = true;
+            vlmInstructionInput.disabled = false;
+            // Re-enable M3 nav buttons
+            startNavBtn.disabled = false;
+            startNavToBtn.disabled = !pinnedGoal;
+            controlsDisabledHint.style.display = "none";
+            clearVlmTickTimer();
+            vlmStatusPanel.style.display = "none";
+        }
+    }
+
+    function scheduleNextVlmTick() {
+        if (vlmTickTimer !== null) return;
+        vlmTickTimer = setTimeout(function () {
+            vlmTickTimer = null;
+            sendVlmTick();
+        }, 100); // 100ms delay - slower than M3 nav due to potential VLM latency
+    }
+
+    function clearVlmTickTimer() {
+        if (vlmTickTimer !== null) {
+            clearTimeout(vlmTickTimer);
+            vlmTickTimer = null;
         }
     }
 
@@ -292,11 +482,16 @@
         }
         waitingForResponse = true;
         setNavMode("manual");
-        // Clear pin
+        // Clear pins
         pinnedGoal = null;
         goalPin.style.display = "none";
         pinnedGoalLabel.style.display = "none";
         startNavToBtn.disabled = true;
+        // Clear projected point
+        projectedPoint = null;
+        projectedPin.style.display = "none";
+        projectedLabel.style.display = "none";
+        fwdClickMarker.style.display = "none";
         ws.send(JSON.stringify({ type: "reset" }));
     }
 
@@ -338,6 +533,39 @@
         ws.send(JSON.stringify({ type: "start_nav_to", goal: goal }));
     }
 
+    // -- M5 VLM Navigation send functions ---------------------------------
+    function sendStartVlmNav(instruction) {
+        if (!ws || ws.readyState !== WebSocket.OPEN || waitingForResponse) {
+            return;
+        }
+        if (!instruction || instruction.trim() === "") {
+            showVlmResult(false, "Please enter an instruction (e.g., 'go to the bedroom')");
+            return;
+        }
+        waitingForResponse = true;
+        vlmResult.style.display = "none";
+        setVlmMode("vlm_nav");
+        ws.send(JSON.stringify({ type: "start_vlm_nav", instruction: instruction.trim() }));
+    }
+
+    function sendStopVlmNav() {
+        if (!ws || ws.readyState !== WebSocket.OPEN || waitingForResponse) {
+            return;
+        }
+        waitingForResponse = true;
+        ws.send(JSON.stringify({ type: "stop_vlm_nav" }));
+        setVlmMode("manual");
+    }
+
+    function sendVlmTick() {
+        if (!ws || ws.readyState !== WebSocket.OPEN || waitingForResponse) {
+            return;
+        }
+        if (navMode !== "vlm_nav") return;
+        waitingForResponse = true;
+        ws.send(JSON.stringify({ type: "vlm_tick" }));
+    }
+
     // -- NavMesh click-to-pin handler ------------------------------------
     topdownImg.addEventListener("click", function (e) {
         if (navMode === "autonomous") return;
@@ -367,6 +595,41 @@
         // Enable "Nav to Pin" button
         startNavToBtn.disabled = false;
     });
+
+    // -- Forward image click-to-project handler ---------------------------
+    fwdContainer.addEventListener("click", function (e) {
+        console.log("Forward image clicked, navMode=" + navMode + ", waiting=" + waitingForResponse);
+        if (navMode === "autonomous" || navMode === "vlm_nav") return;
+        if (waitingForResponse) return;
+
+        var rect = fwdImg.getBoundingClientRect();
+        var pixelX = Math.round((e.clientX - rect.left) * (640 / rect.width));
+        var pixelY = Math.round((e.clientY - rect.top) * (480 / rect.height));
+
+        // Clamp to image bounds
+        pixelX = Math.max(0, Math.min(639, pixelX));
+        pixelY = Math.max(0, Math.min(479, pixelY));
+
+        // Show click marker on forward image
+        var fracX = (e.clientX - rect.left) / rect.width;
+        var fracY = (e.clientY - rect.top) / rect.height;
+        fwdClickMarker.style.display = "block";
+        fwdClickMarker.style.left = (fracX * 100) + "%";
+        fwdClickMarker.style.top = (fracY * 100) + "%";
+
+        // Send projection request
+        sendProjectPixel(pixelX, pixelY);
+    });
+
+    function sendProjectPixel(u, v) {
+        if (!ws || ws.readyState !== WebSocket.OPEN || waitingForResponse) {
+            console.log("sendProjectPixel blocked: ws=" + (ws ? ws.readyState : "null") + ", waiting=" + waitingForResponse);
+            return;
+        }
+        console.log("sendProjectPixel: u=" + u + ", v=" + v);
+        waitingForResponse = true;
+        ws.send(JSON.stringify({ type: "project_pixel", u: u, v: v }));
+    }
 
     // -- Keyboard handler -------------------------------------------------
     document.addEventListener("keydown", function (e) {
@@ -412,6 +675,164 @@
         sendStopNav();
     });
 
+    // M5 VLM button handlers
+    startVlmNavBtn.addEventListener("click", function () {
+        sendStartVlmNav(vlmInstructionInput.value);
+    });
+
+    stopVlmNavBtn.addEventListener("click", function () {
+        sendStopVlmNav();
+    });
+
+    // Allow Enter key to start VLM nav
+    vlmInstructionInput.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" && navMode === "manual") {
+            e.preventDefault();
+            sendStartVlmNav(vlmInstructionInput.value);
+        }
+    });
+
+    // -- Scene selection --------------------------------------------------
+    function fetchScenes() {
+        fetch("/api/scenes")
+            .then(function (res) { return res.json(); })
+            .then(function (data) {
+                sceneSelect.innerHTML = "";
+                if (!data.scenes || data.scenes.length === 0) {
+                    var opt = document.createElement("option");
+                    opt.value = "";
+                    opt.textContent = "No scenes found";
+                    sceneSelect.appendChild(opt);
+                    return;
+                }
+                data.scenes.forEach(function (scene) {
+                    var opt = document.createElement("option");
+                    opt.value = scene.id;
+                    opt.textContent = scene.name;
+                    if (scene.id === data.current) {
+                        opt.selected = true;
+                    }
+                    sceneSelect.appendChild(opt);
+                });
+                // Fetch semantic objects for current scene
+                fetchSemanticObjects();
+            })
+            .catch(function (err) {
+                console.error("Failed to fetch scenes:", err);
+                sceneSelect.innerHTML = "<option value=''>Error loading scenes</option>";
+            });
+    }
+
+    function fetchSemanticObjects() {
+        fetch("/api/semantic_objects")
+            .then(function (res) { return res.json(); })
+            .then(function (data) {
+                semanticObjectSelect.innerHTML = "";
+                semanticObjects = {};
+
+                if (!data.has_semantic || !data.objects || data.objects.length === 0) {
+                    var opt = document.createElement("option");
+                    opt.value = "";
+                    opt.textContent = "No objects available";
+                    semanticObjectSelect.appendChild(opt);
+                    navToObjectBtn.disabled = true;
+                    objectDetail.style.display = "none";
+                    return;
+                }
+
+                // Add placeholder option
+                var placeholder = document.createElement("option");
+                placeholder.value = "";
+                placeholder.textContent = "Select object (" + data.count + " available)";
+                semanticObjectSelect.appendChild(placeholder);
+
+                // Add each object
+                data.objects.forEach(function (obj) {
+                    semanticObjects[obj.object_id] = obj;
+                    var opt = document.createElement("option");
+                    opt.value = obj.object_id;
+                    opt.textContent = obj.instance_name;
+                    semanticObjectSelect.appendChild(opt);
+                });
+
+                navToObjectBtn.disabled = true; // Enable when selection made
+            })
+            .catch(function (err) {
+                console.error("Failed to fetch semantic objects:", err);
+                semanticObjectSelect.innerHTML = "<option value=''>Error loading objects</option>";
+                navToObjectBtn.disabled = true;
+            });
+    }
+
+    function sendChangeScene(sceneId) {
+        if (!ws || ws.readyState !== WebSocket.OPEN || waitingForResponse || changingScene) {
+            return;
+        }
+        if (!sceneId) return;
+
+        changingScene = true;
+        waitingForResponse = true;
+        sceneSelect.disabled = true;
+
+        // Stop any active navigation
+        if (navMode === "autonomous") {
+            setNavMode("manual");
+        }
+        if (navMode === "vlm_nav") {
+            setVlmMode("manual");
+        }
+
+        // Clear pins
+        pinnedGoal = null;
+        goalPin.style.display = "none";
+        pinnedGoalLabel.style.display = "none";
+        startNavToBtn.disabled = true;
+        // Clear projected point
+        projectedPoint = null;
+        projectedPin.style.display = "none";
+        projectedLabel.style.display = "none";
+        fwdClickMarker.style.display = "none";
+
+        ws.send(JSON.stringify({ type: "change_scene", scene_id: sceneId }));
+    }
+
+    sceneSelect.addEventListener("change", function () {
+        sendChangeScene(sceneSelect.value);
+    });
+
+    // Semantic object selection handler
+    semanticObjectSelect.addEventListener("change", function () {
+        var objId = parseInt(semanticObjectSelect.value);
+        if (!objId || !semanticObjects[objId]) {
+            objectDetail.style.display = "none";
+            navToObjectBtn.disabled = true;
+            return;
+        }
+
+        var obj = semanticObjects[objId];
+        objectLabel.textContent = obj.label;
+        if (obj.navmesh_position) {
+            objectPos.textContent = "[" + obj.navmesh_position.map(function(v) { return v.toFixed(2); }).join(", ") + "]";
+        } else {
+            objectPos.textContent = "--";
+        }
+        objectDetail.style.display = "block";
+        navToObjectBtn.disabled = false;
+    });
+
+    // Navigate to object button
+    navToObjectBtn.addEventListener("click", function () {
+        var objId = parseInt(semanticObjectSelect.value);
+        if (!objId || !ws || ws.readyState !== WebSocket.OPEN || waitingForResponse) {
+            return;
+        }
+        waitingForResponse = true;
+        navResult.style.display = "none";
+        setNavMode("autonomous");
+        ws.send(JSON.stringify({ type: "start_nav_to_object", object_id: objId }));
+    });
+
     // -- Initialize -------------------------------------------------------
+    fetchScenes();
     connect();
 })();

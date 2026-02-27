@@ -6,7 +6,7 @@ Uses OpenCV (cv2) for image encoding.
 """
 
 import math
-from typing import List
+from typing import List, Optional
 
 import cv2
 import numpy as np
@@ -313,6 +313,50 @@ def render_semantic_overlay(
     return buf.tobytes()
 
 
+def render_rgb_with_vlm_target(
+    rgb: NDArray[np.uint8],
+    vlm_pixel: Optional[tuple],
+    target_valid: bool,
+) -> bytes:
+    """Overlay VLM-selected pixel target on RGB image (JPEG).
+
+    Draws a crosshair at the VLM-selected pixel location.
+    Green if target is valid, red if invalid (depth/snap failed).
+
+    Args:
+        rgb: [H, W, 4] RGBA image.
+        vlm_pixel: (u, v) pixel coordinates, or None if no target.
+        target_valid: True if projection/snap succeeded.
+
+    Returns:
+        JPEG-encoded bytes.
+    """
+    # Convert RGBA to BGR
+    bgr = cv2.cvtColor(rgb[:, :, :3], cv2.COLOR_RGB2BGR)
+
+    if vlm_pixel is not None:
+        u, v = vlm_pixel
+        color = (0, 255, 0) if target_valid else (0, 0, 255)  # Green if valid, red if not
+
+        # Draw crosshair
+        cv2.drawMarker(
+            bgr, (u, v), color,
+            cv2.MARKER_CROSS, 30, 2,
+        )
+        # Draw circle around it
+        cv2.circle(bgr, (u, v), 15, color, 2)
+
+        # Draw label
+        label = "VLM Target" if target_valid else "VLM Target (invalid)"
+        cv2.putText(
+            bgr, label, (u + 20, v - 10),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA,
+        )
+
+    _, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return buf.tobytes()
+
+
 def render_topdown_with_path(
     navmesh_grid: NDArray[np.bool_],
     agent_position: NDArray[np.float64],
@@ -397,6 +441,103 @@ def render_topdown_with_path(
         canvas, goal_px, (0, 255, 0),
         cv2.MARKER_STAR, 12, 2,
     )
+
+    # Draw agent as red circle with heading arrow
+    agent_px_x, agent_px_y = world_to_px(agent_position)
+    cv2.circle(canvas, (agent_px_x, agent_px_y), 6, (0, 0, 255), -1)
+
+    yaw = yaw_from_quaternion(agent_rotation)
+    arrow_len = 20
+    dx = -math.sin(yaw) * arrow_len * (canvas_size / x_range) * meters_per_pixel
+    dy = -math.cos(yaw) * arrow_len * (canvas_size / z_range) * meters_per_pixel
+    end_x = int(agent_px_x + dx)
+    end_y = int(agent_px_y + dy)
+    cv2.arrowedLine(
+        canvas, (agent_px_x, agent_px_y), (end_x, end_y),
+        (0, 255, 0), 2, tipLength=0.3,
+    )
+
+    _, buf = cv2.imencode(".png", canvas)
+    return buf.tobytes()
+
+
+def render_topdown_with_vlm_target(
+    navmesh_grid: NDArray[np.bool_],
+    agent_position: NDArray[np.float64],
+    agent_rotation: NDArray[np.float64],
+    navmesh_bounds: tuple,
+    vlm_target: Optional[NDArray[np.float64]],
+    waypoints: List[NDArray[np.float64]],
+    current_waypoint_idx: int,
+    meters_per_pixel: float = 0.05,
+    canvas_size: int = 400,
+) -> bytes:
+    """Render top-down NavMesh view with VLM navigation target overlay.
+
+    Shows:
+    - NavMesh (navigable=light, non-navigable=dark)
+    - Agent position + heading (red circle + green arrow)
+    - VLM target point (magenta star)
+    - Path waypoints to target (blue line + dots)
+    - Current waypoint (yellow)
+
+    Args:
+        navmesh_grid: 2D bool array (True = navigable).
+        agent_position: [3] world-frame position.
+        agent_rotation: [4] quaternion [w, x, y, z].
+        navmesh_bounds: (lower_bound, upper_bound), each [3] arrays.
+        vlm_target: [3] world position of VLM-selected NavMesh target, or None.
+        waypoints: List of [3] world positions (path to target).
+        current_waypoint_idx: Index of the next target waypoint.
+        meters_per_pixel: Resolution of the navmesh grid.
+        canvas_size: Output image side length in pixels.
+
+    Returns:
+        PNG-encoded bytes.
+    """
+    lower, upper = navmesh_bounds
+
+    # Create grayscale image from navmesh grid
+    grid_img = np.where(navmesh_grid, 220, 40).astype(np.uint8)
+    canvas = cv2.resize(
+        grid_img, (canvas_size, canvas_size), interpolation=cv2.INTER_NEAREST
+    )
+    canvas = cv2.cvtColor(canvas, cv2.COLOR_GRAY2BGR)
+
+    x_range = max(upper[0] - lower[0], 1e-6)
+    z_range = max(upper[2] - lower[2], 1e-6)
+
+    def world_to_px(pos: NDArray) -> tuple:
+        px_x = int((pos[0] - lower[0]) / x_range * canvas_size)
+        px_y = int((pos[2] - lower[2]) / z_range * canvas_size)
+        px_x = max(0, min(canvas_size - 1, px_x))
+        px_y = max(0, min(canvas_size - 1, px_y))
+        return px_x, px_y
+
+    # Draw waypoint connections (thin blue lines)
+    if len(waypoints) >= 2:
+        for i in range(len(waypoints) - 1):
+            pt1 = world_to_px(waypoints[i])
+            pt2 = world_to_px(waypoints[i + 1])
+            cv2.line(canvas, pt1, pt2, (255, 100, 0), 1, cv2.LINE_AA)
+
+    # Draw waypoints (blue dots)
+    for i, wp in enumerate(waypoints):
+        px = world_to_px(wp)
+        if i == current_waypoint_idx:
+            # Current waypoint: yellow
+            cv2.circle(canvas, px, 5, (0, 255, 255), -1)
+        else:
+            # Other waypoints: blue
+            cv2.circle(canvas, px, 3, (255, 100, 0), -1)
+
+    # Draw VLM target (magenta star)
+    if vlm_target is not None:
+        target_px = world_to_px(vlm_target)
+        cv2.drawMarker(
+            canvas, target_px, (255, 0, 255),  # Magenta
+            cv2.MARKER_STAR, 14, 2,
+        )
 
     # Draw agent as red circle with heading arrow
     agent_px_x, agent_px_y = world_to_px(agent_position)

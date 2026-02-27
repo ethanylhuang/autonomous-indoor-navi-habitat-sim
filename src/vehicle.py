@@ -6,6 +6,7 @@ and wraps pathfinding for NavMesh access.
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import habitat_sim
@@ -74,12 +75,17 @@ class Vehicle:
         sim_params: Optional[SimParams] = None,
         agent_params: Optional[AgentParams] = None,
         imu_dt: float = 1.0,
+        navmesh_path: Optional[str] = None,
     ) -> None:
         cfg = make_sim_config(sim_params, agent_params)
         self._sim = habitat_sim.Simulator(cfg)
         self._agent = self._sim.initialize_agent(0)
         self._imu = SimulatedIMU(dt=imu_dt)
         self._step_count: int = 0
+
+        # Load navmesh manually if provided (needed when using scene_dataset_config)
+        if navmesh_path is not None:
+            self._sim.pathfinder.load_nav_mesh(navmesh_path)
 
         # Fail fast if NavMesh is not loaded
         if not self._sim.pathfinder.is_loaded:
@@ -88,6 +94,51 @@ class Vehicle:
                 "NavMesh not loaded. Ensure the scene file has an associated "
                 ".navmesh file or a baked-in navigation mesh."
             )
+
+        # Place agent on the largest navmesh island (most connected navigable area)
+        # This avoids spawning in small isolated areas like garages
+        import quaternion as qt
+
+        start = self._find_best_spawn_point()
+        agent_state = self._agent.get_state()
+        agent_state.position = start
+        agent_state.rotation = qt.quaternion(1, 0, 0, 0)
+        self._agent.set_state(agent_state)
+
+    def _find_best_spawn_point(self) -> NDArray:
+        """Find a spawn point on the largest navmesh island.
+
+        Samples multiple random points and picks one from the island
+        that has the most other sample points reachable from it.
+        """
+        # Sample candidate spawn points
+        num_samples = 20
+        candidates = []
+        for _ in range(num_samples):
+            pt = self._sim.pathfinder.get_random_navigable_point()
+            candidates.append(pt)
+
+        # For each candidate, count how many other candidates are reachable
+        best_point = candidates[0]
+        best_reachable = 0
+
+        for i, pt in enumerate(candidates):
+            reachable_count = 0
+            for j, other in enumerate(candidates):
+                if i == j:
+                    continue
+                path = ShortestPath()
+                path.requested_start = np.asarray(pt, dtype=np.float32)
+                path.requested_end = np.asarray(other, dtype=np.float32)
+                self._sim.pathfinder.find_path(path)
+                if path.geodesic_distance < float("inf"):
+                    reachable_count += 1
+
+            if reachable_count > best_reachable:
+                best_reachable = reachable_count
+                best_point = pt
+
+        return np.array(best_point, dtype=np.float64)
 
     # -- Public API --------------------------------------------------------
 
@@ -184,6 +235,62 @@ class Vehicle:
         self._imu.reset()
         self._step_count = 0
 
+    def turn_to_heading(self, target_yaw: float) -> Observations:
+        """Rotate agent to face an absolute heading (radians).
+
+        Does NOT advance the simulator step counter or physics.
+        Only updates agent rotation and returns current observations.
+
+        Args:
+            target_yaw: Target heading in radians. 0 = facing -Z, positive = CCW.
+
+        Returns:
+            Current observations after rotation.
+        """
+        from src.utils.transforms import quaternion_from_yaw
+        import quaternion as qt
+
+        # Create rotation quaternion from target yaw
+        rot_array = quaternion_from_yaw(target_yaw)
+
+        # Set agent rotation
+        agent_state = self._agent.get_state()
+        agent_state.rotation = qt.quaternion(rot_array[0], rot_array[1], rot_array[2], rot_array[3])
+        self._agent.set_state(agent_state)
+
+        # Get and return observations (no step, no physics advance)
+        raw_obs = self._sim.get_sensor_observations()
+        return self._build_observations(raw_obs)
+
+    def step_with_heading(
+        self,
+        target_yaw: Optional[float] = None,
+        move_forward: bool = False,
+    ) -> Observations:
+        """Execute a combined turn-then-move action.
+
+        If target_yaw is provided, first rotates to that heading.
+        If move_forward is True, then executes a forward step.
+
+        Args:
+            target_yaw: Optional absolute heading to face first (radians).
+            move_forward: Whether to move forward after turning.
+
+        Returns:
+            Observations after the action(s).
+        """
+        # Turn first if requested
+        if target_yaw is not None:
+            self.turn_to_heading(target_yaw)
+
+        # Move forward if requested
+        if move_forward:
+            return self.step("move_forward")
+        else:
+            # Just return current observations
+            raw_obs = self._sim.get_sensor_observations()
+            return self._build_observations(raw_obs)
+
     def close(self) -> None:
         """Release simulator resources."""
         if self._sim is not None:
@@ -194,6 +301,20 @@ class Vehicle:
     def pathfinder(self):
         """Direct access to the simulator's PathFinder."""
         return self._sim.pathfinder
+
+    @property
+    def semantic_scene(self):
+        """Direct access to the simulator's SemanticScene.
+
+        Returns habitat_sim.SemanticScene which provides:
+        - objects: list of SemanticObject with .aabb, .category, .id
+        - regions: list of SemanticRegion with .id, .category, .contains()
+        - levels: list of SemanticLevel
+
+        Note: Only populated when using scene_dataset_config.json that
+        references semantic assets (.semantic.glb + .semantic.txt).
+        """
+        return self._sim.semantic_scene
 
     # -- Private -----------------------------------------------------------
 

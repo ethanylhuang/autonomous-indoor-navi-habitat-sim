@@ -285,8 +285,13 @@ class NavigationController:
                 )
                 self._replan_count += 1
 
+        # 9. Format action: encode target_yaw and move_forward
+        action = f"turn_to:{local_result.target_yaw:.6f}"
+        if local_result.move_forward:
+            action += ":move"
+
         return NavigationStatus(
-            action=local_result.best_action,
+            action=action,
             goal_reached=False,
             is_stuck=is_stuck,
             needs_replan=needs_replan,
@@ -365,6 +370,83 @@ class NavigationController:
         newest = self._position_history[-1]
         displacement = float(np.linalg.norm(newest - oldest))
         return displacement < self._stuck_displacement
+
+    def _get_effective_waypoint(
+        self,
+        current_pos: NDArray[np.float64],
+        waypoint: NDArray[np.float64],
+        occupancy_grid: OccupancyGridData,
+    ) -> NDArray[np.float64]:
+        """Get effective waypoint, blending toward next if current is obstructed.
+
+        Checks if the path to the waypoint passes through occupied cells.
+        If obstructed, blends the target toward the lookahead waypoint.
+        """
+        # Check if waypoint area is occupied
+        wp_x, wp_z = waypoint[0], waypoint[2]
+        obstacle_dist = self._check_waypoint_clearance(wp_x, wp_z, occupancy_grid)
+
+        # If waypoint has good clearance, use it directly
+        if obstacle_dist > 0.5:
+            return waypoint
+
+        # Waypoint is near obstacle — try to blend toward next waypoint
+        lookahead = self._global_planner.get_lookahead_waypoint()
+        if lookahead is None:
+            # No next waypoint, use the goal
+            lookahead = self._goal
+
+        # Blend: move target partway toward lookahead
+        # More obstruction = more blend toward lookahead
+        blend_factor = min(1.0, (0.5 - obstacle_dist) / 0.5)  # 0 to 1
+        blend_factor = max(0.3, blend_factor)  # at least 30% toward lookahead
+
+        blended = waypoint * (1.0 - blend_factor) + lookahead * blend_factor
+        return blended
+
+    def _check_waypoint_clearance(
+        self,
+        x: float,
+        z: float,
+        grid: OccupancyGridData,
+    ) -> float:
+        """Check clearance around a waypoint. Returns distance to nearest obstacle."""
+        res = grid.resolution
+        origin_x = grid.origin[0]
+        origin_z = grid.origin[1]
+        gh, gw = grid.shape
+
+        # Convert world coords to grid cell
+        col_center = (x - origin_x) / res
+        row_center = (z - origin_z) / res
+
+        # Check within 1m radius
+        radius_cells = int(math.ceil(1.0 / res))
+        col_min = max(0, int(col_center) - radius_cells)
+        col_max = min(gw, int(col_center) + radius_cells + 1)
+        row_min = max(0, int(row_center) - radius_cells)
+        row_max = min(gh, int(row_center) + radius_cells + 1)
+
+        if col_min >= gw or row_min >= gh or col_max <= 0 or row_max <= 0:
+            return float("inf")
+
+        sub_grid = grid.grid[row_min:row_max, col_min:col_max]
+        occupied = sub_grid > 0.5
+
+        if not np.any(occupied):
+            return float("inf")
+
+        # Get occupied cell coordinates
+        occ_rows, occ_cols = np.where(occupied)
+        occ_rows = occ_rows + row_min
+        occ_cols = occ_cols + col_min
+
+        # Compute distances in world coordinates
+        occ_world_x = origin_x + (occ_cols.astype(np.float64) + 0.5) * res
+        occ_world_z = origin_z + (occ_rows.astype(np.float64) + 0.5) * res
+
+        dists = np.sqrt((occ_world_x - x) ** 2 + (occ_world_z - z) ** 2)
+        return float(np.min(dists))
 
     @property
     def is_episode_done(self) -> bool:

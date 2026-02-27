@@ -32,9 +32,11 @@ class GlobalPlanner:
         self,
         waypoint_reach_threshold: float = 0.5,
         max_waypoint_skip: int = 3,
+        corner_smooth_radius: float = 0.4,
     ) -> None:
         self._waypoint_reach_threshold = waypoint_reach_threshold
         self._max_waypoint_skip = max_waypoint_skip
+        self._corner_smooth_radius = corner_smooth_radius
         self._path: Optional[GlobalPath] = None
 
     def plan(
@@ -66,6 +68,10 @@ class GlobalPlanner:
             return self._path
 
         wp_list = [np.asarray(w, dtype=np.float64) for w in waypoints]
+
+        # Smooth corner waypoints by pulling them toward the path midline
+        wp_list = self._smooth_corners(wp_list)
+
         self._path = GlobalPath(
             waypoints=wp_list,
             geodesic_distance=geodesic_distance,
@@ -81,6 +87,15 @@ class GlobalPlanner:
         if self._path.current_waypoint_idx >= len(self._path.waypoints):
             return None
         return self._path.waypoints[self._path.current_waypoint_idx]
+
+    def get_lookahead_waypoint(self) -> Optional[NDArray[np.float64]]:
+        """Return the waypoint after the current one, or None if unavailable."""
+        if self._path is None or not self._path.is_valid:
+            return None
+        next_idx = self._path.current_waypoint_idx + 1
+        if next_idx >= len(self._path.waypoints):
+            return None
+        return self._path.waypoints[next_idx]
 
     def advance_waypoint(
         self,
@@ -161,6 +176,70 @@ class GlobalPlanner:
     def reset(self) -> None:
         """Clear path state."""
         self._path = None
+
+    def _smooth_corners(
+        self,
+        waypoints: List[NDArray[np.float64]],
+    ) -> List[NDArray[np.float64]]:
+        """Smooth sharp corner waypoints by pulling them toward the path center.
+
+        For each interior waypoint, if the turn angle is sharp (>45 deg),
+        offset the waypoint inward along the angle bisector. This keeps
+        the agent away from tight corners.
+        """
+        if len(waypoints) < 3:
+            return waypoints
+
+        result = [waypoints[0]]
+
+        for i in range(1, len(waypoints) - 1):
+            prev = waypoints[i - 1]
+            curr = waypoints[i]
+            next_wp = waypoints[i + 1]
+
+            # Vectors in XZ plane
+            v_in = np.array([curr[0] - prev[0], curr[2] - prev[2]])
+            v_out = np.array([next_wp[0] - curr[0], next_wp[2] - curr[2]])
+
+            len_in = np.linalg.norm(v_in)
+            len_out = np.linalg.norm(v_out)
+
+            if len_in < 1e-6 or len_out < 1e-6:
+                result.append(curr)
+                continue
+
+            # Normalize
+            v_in_norm = v_in / len_in
+            v_out_norm = v_out / len_out
+
+            # Compute turn angle (angle between -v_in and v_out)
+            # cos(angle) = dot(-v_in_norm, v_out_norm)
+            cos_angle = float(np.dot(-v_in_norm, v_out_norm))
+            cos_angle = max(-1.0, min(1.0, cos_angle))
+
+            # If turn is sharp (>45 deg, i.e., cos < ~0.7), smooth it
+            if cos_angle < 0.7:
+                # Bisector direction: average of incoming and outgoing directions
+                # Points "inward" toward the center of the turn
+                bisector = v_in_norm + v_out_norm
+                bisector_len = np.linalg.norm(bisector)
+
+                if bisector_len > 1e-6:
+                    bisector_norm = bisector / bisector_len
+                    # Offset amount scales with turn sharpness
+                    # Sharper turn (lower cos) = more offset
+                    offset_amount = self._corner_smooth_radius * (1.0 - cos_angle)
+                    new_x = curr[0] + bisector_norm[0] * offset_amount
+                    new_z = curr[2] + bisector_norm[1] * offset_amount
+                    smoothed = np.array([new_x, curr[1], new_z], dtype=np.float64)
+                    result.append(smoothed)
+                else:
+                    result.append(curr)
+            else:
+                result.append(curr)
+
+        result.append(waypoints[-1])
+        return result
 
 
 def _xz_distance(a: NDArray[np.float64], b: NDArray[np.float64]) -> float:

@@ -152,6 +152,9 @@
     <div class="header">
         <h1>Autonomous Vehicle Viewer</h1>
         <div class="header-info">
+            <select id="sceneSelect" style="padding: 4px 8px; background: #0f3460; color: #e0e0e0; border: 1px solid #1a1a2e; border-radius: 4px; font-size: 13px; cursor: pointer;">
+                <option value="">Loading scenes...</option>
+            </select>
             <span id="connection-status" class="disconnected">Disconnected</span>
             <span>Step: <strong id="stepCount">0</strong></span>
             <span>Collided: <strong id="collided">No</strong></span>
@@ -161,8 +164,11 @@
 
     <div class="camera-row">
         <div class="panel">
-            <div class="panel-title">Forward RGB</div>
-            <img id="fwd" alt="Forward Camera">
+            <div class="panel-title">Forward RGB — Click to Project</div>
+            <div id="fwdContainer" style="position: relative; cursor: crosshair;">
+                <img id="fwd" alt="Forward Camera" style="display: block; width: 100%;">
+                <div id="fwdClickMarker" style="display: none; position: absolute; width: 16px; height: 16px; border: 2px solid #00ffff; border-radius: 50%; background: rgba(0,255,255,0.3); transform: translate(-50%, -50%); pointer-events: none;"></div>
+            </div>
         </div>
         <div class="panel">
             <div class="panel-title">Rear RGB</div>
@@ -181,6 +187,7 @@
             <div style="position: relative; cursor: crosshair;">
                 <img id="topdown" alt="Top-Down View" style="display: block; width: 100%;">
                 <div id="goalPin" style="display: none; position: absolute; width: 12px; height: 12px; border: 2px solid #00ff00; border-radius: 50%; background: rgba(0,255,0,0.4); transform: translate(-50%, -50%); pointer-events: none;"></div>
+                <div id="projectedPin" style="display: none; position: absolute; width: 14px; height: 14px; border: 2px solid #00ffff; border-radius: 50%; background: rgba(0,255,255,0.4); transform: translate(-50%, -50%); pointer-events: none;"></div>
             </div>
         </div>
         <div class="panel">
@@ -193,6 +200,7 @@
                 </div>
                 <div style="font-size: 13px; color: #a0a0b0; margin-bottom: 4px;">Mode: <strong id="navModeValue" style="color: #e0e0e0;">Manual</strong></div>
                 <div id="pinnedGoalLabel" style="display: none; font-size: 12px; color: #a0a0b0; margin-bottom: 4px;">Pin: <span id="pinnedGoalCoords" style="color: #00ff88;">--</span></div>
+                <div id="projectedLabel" style="display: none; font-size: 12px; color: #a0a0b0; margin-bottom: 4px;">Projected: <span id="projectedCoords" style="color: #00ffff;">--</span></div>
                 <div id="navResult" style="display: none; padding: 6px; border-radius: 4px; margin-top: 4px; font-size: 13px;"></div>
             </div>
         </div>
@@ -215,6 +223,54 @@
                 <span class="value" id="navSPL">--</span>
                 <span class="label">Action:</span>
                 <span class="value" id="navAction">--</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- M5 VLM Navigation Control -->
+    <div style="padding: 0 24px 8px;">
+        <div class="panel">
+            <div class="panel-title">VLM Semantic Navigation (M5)</div>
+            <div style="padding: 12px;">
+                <div style="display: flex; gap: 8px; margin-bottom: 8px; align-items: center;">
+                    <input type="text" id="vlmInstructionInput" placeholder="e.g., go to the bedroom" style="flex: 1; padding: 8px 12px; border: 1px solid #0f3460; border-radius: 4px; background: #1a1a2e; color: #e0e0e0; font-size: 14px;">
+                    <button id="startVlmNavBtn" style="padding: 8px 20px; background: #6a1b9a; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; white-space: nowrap;">Start VLM Nav</button>
+                    <button id="stopVlmNavBtn" style="padding: 8px 16px; background: #b71c1c; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 13px;" disabled>Stop</button>
+                </div>
+                <div id="vlmStatusPanel" style="display: none; background: #0f3460; border-radius: 4px; padding: 8px 12px; margin-top: 8px;">
+                    <div style="display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13px;">
+                        <span style="color: #a0a0b0;">Instruction:</span>
+                        <span id="vlmInstruction" style="color: #e0e0e0;">--</span>
+                        <span style="color: #a0a0b0;">Subgoal:</span>
+                        <span id="vlmSubgoal" style="color: #e94560;">--</span>
+                        <span style="color: #a0a0b0;">VLM Reasoning:</span>
+                        <span id="vlmReasoning" style="color: #a5d6a7; font-style: italic;">--</span>
+                        <span style="color: #a0a0b0;">Confidence:</span>
+                        <span id="vlmConfidence" style="color: #e0e0e0;">--</span>
+                        <span style="color: #a0a0b0;">Steps / VLM Calls:</span>
+                        <span id="vlmStepsCalls" style="color: #e0e0e0;">--</span>
+                    </div>
+                </div>
+                <div id="vlmResult" style="display: none; padding: 6px; border-radius: 4px; margin-top: 8px; font-size: 13px;"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Semantic Object Navigation -->
+    <div style="padding: 0 24px 8px;">
+        <div class="panel">
+            <div class="panel-title">Semantic Object Navigation</div>
+            <div style="padding: 12px;">
+                <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                    <select id="semanticObjectSelect" style="flex: 1; padding: 6px 8px; background: #0f3460; color: #e0e0e0; border: 1px solid #0f3460; border-radius: 4px; font-size: 13px;">
+                        <option value="">Select object...</option>
+                    </select>
+                    <button id="navToObjectBtn" style="padding: 6px 16px; background: #0f3460; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 13px;" disabled>Navigate</button>
+                </div>
+                <div id="objectDetail" style="display: none; font-size: 12px; color: #a0a0b0; padding: 8px; background: #0f3460; border-radius: 4px;">
+                    <div>Label: <span id="objectLabel" style="color: #00ff88;">--</span></div>
+                    <div>Position: <span id="objectPos" style="color: #00ff88;">--</span></div>
+                </div>
             </div>
         </div>
     </div>

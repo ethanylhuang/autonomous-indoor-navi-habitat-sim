@@ -29,6 +29,7 @@ class AgentParams:
 @dataclass
 class SimParams:
     scene_id: str = "data/scene_datasets/habitat-test-scenes/skokloster-castle.glb"
+    scene_dataset_config: Optional[str] = None  # Path to .scene_dataset_config.json
     enable_physics: bool = True
     allow_sliding: bool = True
     random_seed: int = 42
@@ -70,10 +71,36 @@ def make_sim_config(
     sim_params: Optional[SimParams] = None,
     agent_params: Optional[AgentParams] = None,
 ) -> habitat_sim.Configuration:
-    """Build the complete habitat_sim.Configuration."""
+    """Build the complete habitat_sim.Configuration.
+
+    When scene_dataset_config is provided, uses habitat-sim's make_cfg for proper
+    scene/navmesh coordinate alignment.
+    """
     if sim_params is None:
         sim_params = SimParams()
+    if agent_params is None:
+        agent_params = AgentParams()
 
+    # When using scene_dataset_config, use habitat-sim's make_cfg for proper alignment
+    if sim_params.scene_dataset_config:
+        from habitat_sim.utils.settings import default_sim_settings, make_cfg
+
+        settings = default_sim_settings.copy()
+        settings["scene_dataset_config_file"] = sim_params.scene_dataset_config
+        settings["scene"] = sim_params.scene_id
+        settings["enable_physics"] = sim_params.enable_physics
+        settings["seed"] = sim_params.random_seed
+
+        # Build base config using habitat-sim's make_cfg
+        cfg = make_cfg(settings)
+
+        # Replace agent config with our custom one (preserves our sensor specs)
+        agent_cfg = make_agent_config(agent_params)
+        cfg.agents = [agent_cfg]
+
+        return cfg
+
+    # Standard path for direct scene loading (no scene_dataset_config)
     sim_cfg = habitat_sim.SimulatorConfiguration()
     sim_cfg.scene_id = sim_params.scene_id
     sim_cfg.enable_physics = sim_params.enable_physics

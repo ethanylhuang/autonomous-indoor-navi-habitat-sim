@@ -7,21 +7,20 @@ Usage:
 
 import argparse
 import logging
-import sys
 from typing import Optional
 
 import numpy as np
 from numpy.typing import NDArray
 
 from configs.sensor_rig import HFOV
-from configs.sim_config import AgentParams, SimParams
+from configs.sim_config import SimParams
 from src.control.controller import EpisodeResult, NavigationController
 from src.perception.obstacle_detector import ObstacleDetector
 from src.perception.occupancy_grid import OccupancyGrid
 from src.perception.visual_odometry import VisualOdometry
 from src.planning.global_planner import GlobalPlanner
 from src.planning.local_planner import LocalPlanner
-from src.sensors.lidar import depth_to_point_cloud, merge_point_clouds, transform_point_cloud
+from src.sensors.lidar import depth_to_point_cloud, transform_point_cloud
 from src.state_estimation.estimator import EKFEstimator
 from src.utils.transforms import quat_multiply, yaw_from_quaternion
 from src.vehicle import Vehicle
@@ -132,7 +131,12 @@ def run_episode(
             break
 
         # -- Action Execution --
-        obs = vehicle.step(nav_status.action)
+        # Parse continuous action: "turn_to:{yaw}" or "turn_to:{yaw}:move"
+        action = nav_status.action
+        parts = action.split(":")
+        target_yaw = float(parts[1])
+        move_forward = len(parts) > 2 and parts[2] == "move"
+        obs = vehicle.step_with_heading(target_yaw, move_forward)
 
     return controller.finish_episode()
 

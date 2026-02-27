@@ -5,15 +5,23 @@ agent control. Single-client, request/response pattern.
 
 M3 additions: autonomous navigation mode with start_nav/stop_nav/tick
 WebSocket message types.
+
+M5 additions: VLM-guided semantic navigation.
 """
 
 import base64
 import json
 import logging
 import math
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
+
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 import numpy as np
 from numpy.typing import NDArray
@@ -22,6 +30,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from configs.sensor_rig import HFOV
+from configs.sim_config import SimParams
 from src.sensors.lidar import (
     PointCloud,
     depth_to_point_cloud,
@@ -37,9 +46,11 @@ from viewer.renderer import (
     encode_rgb_jpeg,
     render_occupancy_grid,
     render_point_cloud_bev,
+    render_rgb_with_vlm_target,
     render_semantic_overlay,
     render_topdown_view,
     render_topdown_with_path,
+    render_topdown_with_vlm_target,
     render_vo_trajectory,
 )
 
@@ -50,7 +61,102 @@ from src.planning.local_planner import LocalPlanner
 from src.state_estimation.estimator import EKFEstimator
 from src.utils.transforms import normalize_angle, yaw_from_quaternion
 
+# M5 VLM imports
+from src.vlm.client import VLMClient
+from src.vlm.navigator import VLMNavigator, VLMNavStatus
+from src.vlm.projection import pixel_to_world, snap_to_navmesh
+
+# Semantic scene imports
+from src.perception.semantic_scene import (
+    SemanticSceneIndex,
+    build_semantic_index_from_sim,
+    get_navigable_objects,
+)
+
+# Configure logging to show INFO level for VLM debugging
+logging.basicConfig(level=logging.INFO, format="%(name)s - %(levelname)s - %(message)s")
+
 logger = logging.getLogger(__name__)
+
+# Scene datasets base path
+_SCENE_DATASETS_PATH = Path(__file__).parent.parent / "data" / "scene_datasets"
+_HM3D_HABITAT_PATH = Path(__file__).parent.parent / "data" / "hm3d-minival-habitat-v0.2"
+_HM3D_SEMANTIC_PATH = Path(__file__).parent.parent / "data" / "hm3d-minival-semantic-annots-v0.2"
+_PROJECT_ROOT = Path(__file__).parent.parent
+
+# Current scene ID (for reporting to clients)
+_current_scene_id: str = SimParams.scene_id
+
+
+def discover_scenes() -> list[dict]:
+    """Scan for available scenes with matching navmesh files.
+
+    Scans both:
+    - data/scene_datasets/ for standard .glb + .navmesh pairs
+    - data/hm3d-minival-habitat-v0.2/ for HM3D .basis.glb + .basis.navmesh pairs
+
+    Returns:
+        List of {"id": "path/to/scene.glb", "name": "scene_name",
+                 "has_semantic": bool} dicts.
+    """
+    scenes = []
+
+    # 1. Standard test scenes (data/scene_datasets/)
+    if _SCENE_DATASETS_PATH.exists():
+        for glb_path in _SCENE_DATASETS_PATH.rglob("*.glb"):
+            navmesh_path = glb_path.with_suffix(".navmesh")
+            if navmesh_path.exists():
+                try:
+                    rel_path = glb_path.relative_to(_PROJECT_ROOT)
+                except ValueError:
+                    rel_path = glb_path
+                scenes.append({
+                    "id": str(rel_path),
+                    "name": glb_path.stem,
+                    "has_semantic": False,
+                })
+    else:
+        logger.warning("Scene datasets path does not exist: %s", _SCENE_DATASETS_PATH)
+
+    # 2. HM3D minival scenes (data/hm3d-minival-habitat-v0.2/)
+    if _HM3D_HABITAT_PATH.exists():
+        for glb_path in _HM3D_HABITAT_PATH.rglob("*.basis.glb"):
+            # Navmesh has same name pattern: *.basis.navmesh
+            navmesh_path = glb_path.with_name(
+                glb_path.name.replace(".basis.glb", ".basis.navmesh")
+            )
+            if navmesh_path.exists():
+                try:
+                    rel_path = glb_path.relative_to(_PROJECT_ROOT)
+                except ValueError:
+                    rel_path = glb_path
+
+                # Check for corresponding semantic annotations AND scene_dataset_config
+                # Both are required for semantic data to actually work
+                scene_dir = glb_path.parent.name  # e.g., "00800-TEEsavR23oF"
+                scene_id = glb_path.stem.replace(".basis", "")  # e.g., "TEEsavR23oF"
+                semantic_glb = _HM3D_SEMANTIC_PATH / scene_dir / f"{scene_id}.semantic.glb"
+                scene_config = glb_path.parent / f"{scene_id}.scene_dataset_config.json"
+                # Need both semantic GLB and config file for semantic data to work
+                has_semantic = semantic_glb.exists() and scene_config.exists()
+
+                # Build display name: "HM3D: 00800-TEEsavR23oF" or with semantic indicator
+                display_name = f"HM3D: {scene_dir}"
+                if has_semantic:
+                    display_name += " [semantic]"
+
+                scenes.append({
+                    "id": str(rel_path),
+                    "name": display_name,
+                    "has_semantic": has_semantic,
+                })
+    else:
+        logger.info("HM3D habitat path not found: %s", _HM3D_HABITAT_PATH)
+
+    # Sort by name for consistent ordering
+    scenes.sort(key=lambda s: s["name"])
+    return scenes
+
 
 # Module-level vehicle reference, managed by lifespan
 _vehicle: Optional[Vehicle] = None
@@ -75,6 +181,15 @@ _nav_last_status: Optional[NavigationStatus] = None
 _nav_final_spl: Optional[float] = None
 _nav_obs = None  # latest observations during nav mode
 _nav_pipeline_cache = None  # cached perception results from _nav_tick()
+
+# M5 VLM navigation state
+_vlm_client: Optional[VLMClient] = None
+_vlm_navigator: Optional[VLMNavigator] = None
+_vlm_mode: str = "manual"  # "manual" or "vlm_nav"
+_vlm_instruction: Optional[str] = None
+
+# Semantic scene index (built on scene load for HM3D scenes)
+_semantic_index: Optional[SemanticSceneIndex] = None
 
 
 def _compute_rear_rotation(agent_rotation: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -108,6 +223,26 @@ async def lifespan(app: FastAPI):
         global_planner=_nav_global_planner,
         local_planner=_nav_local_planner,
     )
+    # M5 VLM navigation (optional - only if API key is available)
+    global _vlm_client, _vlm_navigator
+    try:
+        _vlm_client = VLMClient()
+        _vlm_navigator = VLMNavigator(
+            _vlm_client,
+            _nav_global_planner,
+            _nav_local_planner,
+            _vehicle.pathfinder,
+        )
+        logger.info("VLM client initialized successfully.")
+    except Exception as e:
+        logger.warning("VLM client not initialized (API key missing?): %s", e)
+        _vlm_client = None
+        _vlm_navigator = None
+    # Build semantic index for initial scene (if applicable)
+    global _semantic_index
+    _semantic_index = build_semantic_index_from_sim(_vehicle)
+    if _semantic_index is not None:
+        logger.info("Semantic index built: %d objects", len(_semantic_index.objects))
     logger.info("Vehicle ready.")
     yield
     logger.info("Shutting down Vehicle...")
@@ -119,15 +254,189 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# Serve static files
+# Static files directory
 _static_dir = Path(__file__).parent / "static"
-app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 
 
 @app.get("/")
 async def index():
     """Serve the dashboard HTML."""
-    return FileResponse(str(_static_dir / "index.html"))
+    return FileResponse(
+        str(_static_dir / "index.html"),
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
+
+
+@app.get("/static/app.js")
+async def app_js():
+    """Serve app.js with no-cache headers."""
+    return FileResponse(
+        str(_static_dir / "app.js"),
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
+
+
+# Mount static files AFTER explicit routes so app.js route takes precedence
+app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
+
+
+@app.get("/api/scenes")
+async def list_scenes():
+    """Return available scenes and current scene."""
+    scenes = discover_scenes()
+    return {
+        "scenes": scenes,
+        "current": _current_scene_id,
+    }
+
+
+@app.get("/api/semantic_objects")
+async def list_semantic_objects():
+    """Return navigable semantic objects reachable from current agent position."""
+    if _semantic_index is None or _vehicle is None:
+        return {"objects": [], "has_semantic": False, "count": 0}
+
+    navigable = get_navigable_objects(_semantic_index)
+
+    # Filter to only objects reachable from current agent position
+    # (same navmesh island - can find valid path)
+    agent_pos = _vehicle._agent.get_state().position
+    reachable = []
+    for obj in navigable:
+        if obj.navmesh_position is None:
+            continue
+        waypoints, dist = _vehicle.find_path(agent_pos, obj.navmesh_position)
+        if len(waypoints) > 0 and dist < float("inf"):
+            reachable.append(obj)
+
+    result = {
+        "objects": [obj.to_dict() for obj in reachable],
+        "has_semantic": True,
+        "count": len(reachable),
+        "total_navigable": len(navigable),  # For info: total vs reachable
+    }
+    # Debug: log first few objects
+    logger.info("list_semantic_objects: %d reachable objects", len(reachable))
+    for obj in reachable[:5]:
+        logger.info("  id=%d label=%s pos=%s", obj.object_id, obj.label, obj.navmesh_position)
+    return result
+
+
+def _reinitialize_simulator(scene_id: str) -> bool:
+    """Reinitialize the simulator with a new scene.
+
+    Args:
+        scene_id: Path to the scene .glb file (relative to project root).
+
+    Returns:
+        True if successful, False otherwise.
+    """
+    global _vehicle, _navmesh_grid, _navmesh_bounds, _current_scene_id
+    global _vo, _detector, _grid, _vo_positions
+    global _nav_mode, _nav_goal, _nav_estimator, _nav_global_planner
+    global _nav_local_planner, _nav_controller, _nav_traveled_path
+    global _nav_last_status, _nav_final_spl, _nav_obs, _nav_pipeline_cache
+    global _vlm_mode, _vlm_instruction
+    global _semantic_index
+
+    # Validate scene exists
+    scene_path = Path(__file__).parent.parent / scene_id
+    if not scene_path.exists():
+        logger.error("Scene file not found: %s", scene_path)
+        return False
+
+    # Handle navmesh path for both standard and HM3D scenes
+    # HM3D uses *.basis.glb -> *.basis.navmesh
+    # Standard uses *.glb -> *.navmesh
+    if scene_path.name.endswith(".basis.glb"):
+        navmesh_path = scene_path.with_name(
+            scene_path.name.replace(".basis.glb", ".basis.navmesh")
+        )
+    else:
+        navmesh_path = scene_path.with_suffix(".navmesh")
+
+    if not navmesh_path.exists():
+        logger.error("NavMesh not found for scene: %s", navmesh_path)
+        return False
+
+    logger.info("Reinitializing simulator with scene: %s", scene_id)
+
+    # Close existing vehicle
+    if _vehicle is not None:
+        _vehicle.close()
+        _vehicle = None
+
+    # Check if this is an HM3D scene with semantic data available
+    # If so, use scene_dataset_config to enable semantic scene access
+    scene_dataset_config = None
+    navmesh_override = None
+    if scene_path.name.endswith(".basis.glb"):
+        # Extract scene directory info for HM3D scenes
+        # e.g., data/hm3d-minival-habitat-v0.2/00802-wcojb4TFT35/wcojb4TFT35.basis.glb
+        scene_dir = scene_path.parent.name  # e.g., "00802-wcojb4TFT35"
+        scene_name = scene_path.stem.replace(".basis", "")  # e.g., "wcojb4TFT35"
+
+        # Check if semantic annotations exist
+        semantic_glb = _HM3D_SEMANTIC_PATH / scene_dir / f"{scene_name}.semantic.glb"
+        if semantic_glb.exists():
+            # Use scene_dataset_config for semantic data access
+            config_path = scene_path.parent / f"{scene_name}.scene_dataset_config.json"
+            if config_path.exists():
+                scene_dataset_config = str(config_path.relative_to(_PROJECT_ROOT))
+                # DON'T set navmesh_override - the scene_dataset_config.json
+                # includes navmesh_asset which auto-loads with correct transforms
+                navmesh_override = None
+                scene_id = scene_name  # Use scene name, not full path
+                logger.info("Using scene_dataset_config for semantic access: %s", scene_dataset_config)
+
+    # Create new vehicle with new scene
+    sim_params = SimParams(scene_id=scene_id, scene_dataset_config=scene_dataset_config)
+    _vehicle = Vehicle(sim_params=sim_params, navmesh_path=navmesh_override)
+    _current_scene_id = scene_id
+
+    # Recompute navmesh grid
+    _navmesh_grid = _vehicle.get_topdown_navmesh()
+    _navmesh_bounds = _vehicle.get_navmesh_bounds()
+
+    # Reset M2 perception modules
+    _vo.reset()
+    _grid.reset()
+    _vo_positions.clear()
+
+    # Reset M3 navigation state
+    _nav_mode = "manual"
+    _nav_goal = None
+    _nav_estimator.reset()
+    _nav_global_planner.reset()
+    _nav_local_planner.reset()
+    _nav_controller.reset()
+    _nav_traveled_path.clear()
+    _nav_last_status = None
+    _nav_final_spl = None
+    _nav_obs = None
+    _nav_pipeline_cache = None
+
+    # Reset M5 VLM state
+    _vlm_mode = "manual"
+    _vlm_instruction = None
+    if _vlm_navigator is not None:
+        _vlm_navigator.reset()
+
+    # Build semantic index for HM3D scenes with semantic data
+    _semantic_index = build_semantic_index_from_sim(_vehicle)
+    if _semantic_index is not None:
+        navigable_count = len(get_navigable_objects(_semantic_index))
+        logger.info(
+            "Semantic index built: %d objects, %d navigable",
+            len(_semantic_index.objects),
+            navigable_count,
+        )
+    else:
+        logger.info("No semantic data available for this scene.")
+
+    logger.info("Simulator reinitialized successfully.")
+    return True
 
 
 def _run_perception_pipeline(obs):
@@ -175,7 +484,6 @@ def _run_perception_pipeline(obs):
 
 def _build_frame(obs, nav_status_dict: Optional[dict] = None) -> dict:
     """Encode observations into a JSON-serializable frame dict."""
-    fwd_jpg = encode_rgb_jpeg(obs.forward_rgb)
     rear_jpg = encode_rgb_jpeg(obs.rear_rgb)
     depth_jpg = colorize_depth(obs.depth)
 
@@ -184,7 +492,45 @@ def _build_frame(obs, nav_status_dict: Optional[dict] = None) -> dict:
         (nav_status_dict is not None and nav_status_dict.get("mode") == "autonomous")
         or (_nav_mode == "autonomous")
     )
-    if is_nav and _nav_goal is not None and _nav_global_planner is not None:
+    is_vlm_nav = _vlm_mode == "vlm_nav"
+
+    # Get VLM pixel target for overlay on forward RGB
+    vlm_pixel = None
+    vlm_target_valid = False
+    if is_vlm_nav and _vlm_navigator is not None:
+        if _vlm_navigator._current_pixel is not None and _vlm_navigator._current_pixel.is_valid:
+            vlm_pixel = (_vlm_navigator._current_pixel.u, _vlm_navigator._current_pixel.v)
+        if _vlm_navigator._current_world_target is not None:
+            vlm_target_valid = _vlm_navigator._current_world_target.is_valid
+
+    # Render forward RGB with VLM target overlay if in VLM nav mode
+    if is_vlm_nav and vlm_pixel is not None:
+        fwd_jpg = render_rgb_with_vlm_target(obs.forward_rgb, vlm_pixel, vlm_target_valid)
+    else:
+        fwd_jpg = encode_rgb_jpeg(obs.forward_rgb)
+
+    if is_vlm_nav and _vlm_navigator is not None and _nav_global_planner is not None:
+        # VLM nav mode: show VLM target point on navmesh
+        path = _nav_global_planner.get_path()
+        waypoints = path.waypoints if path and path.is_valid else []
+        current_idx = path.current_waypoint_idx if path and path.is_valid else 0
+        # Get VLM target from navigator's world target
+        vlm_target = None
+        if (
+            _vlm_navigator._current_world_target is not None
+            and _vlm_navigator._current_world_target.is_valid
+        ):
+            vlm_target = _vlm_navigator._current_world_target.navmesh_position
+        topdown_png = render_topdown_with_vlm_target(
+            _navmesh_grid,
+            obs.state.position,
+            obs.state.rotation,
+            _navmesh_bounds,
+            vlm_target,
+            waypoints,
+            current_idx,
+        )
+    elif is_nav and _nav_goal is not None and _nav_global_planner is not None:
         path = _nav_global_planner.get_path()
         waypoints = path.waypoints if path and path.is_valid else []
         current_idx = path.current_waypoint_idx if path and path.is_valid else 0
@@ -449,7 +795,12 @@ def _nav_tick() -> dict:
         )
     else:
         # Execute action and get new observations
-        _nav_obs = _vehicle.step(nav_status.action)
+        action = nav_status.action
+        # Parse continuous action: "turn_to:{yaw}" or "turn_to:{yaw}:move"
+        parts = action.split(":")
+        target_yaw = float(parts[1])
+        move_forward = len(parts) > 2 and parts[2] == "move"
+        _nav_obs = _vehicle.step_with_heading(target_yaw, move_forward)
 
     return nav_dict
 
@@ -469,6 +820,126 @@ def _stop_autonomous_nav() -> dict:
         "mode": "manual",
         "spl": _nav_final_spl,
     }
+
+
+# ---------------------------------------------------------------------------
+# M5 VLM Navigation Functions
+# ---------------------------------------------------------------------------
+
+
+def _start_vlm_nav(instruction: str) -> dict:
+    """Start VLM-guided navigation to a semantic goal.
+
+    Args:
+        instruction: Natural language goal (e.g., "go to the bedroom").
+
+    Returns:
+        Dict with status or error.
+    """
+    global _vlm_mode, _vlm_instruction, _nav_obs
+
+    if _vlm_navigator is None:
+        return {"error": "VLM not configured (missing API key?)"}
+
+    # Stop any existing navigation
+    if _nav_mode == "autonomous":
+        _stop_autonomous_nav()
+
+    # Reset VLM navigator and start episode
+    _vlm_navigator.reset()
+    _vlm_navigator.start_episode(instruction)
+
+    # Get initial observations
+    _nav_obs = _vehicle.get_initial_observations()
+
+    _vlm_mode = "vlm_nav"
+    _vlm_instruction = instruction
+
+    logger.info("VLM nav started: '%s'", instruction)
+    return {"status": "started", "instruction": instruction}
+
+
+def _vlm_tick() -> dict:
+    """Execute one VLM navigation step.
+
+    Returns:
+        VLM status dict for the frame.
+    """
+    global _vlm_mode, _nav_obs
+
+    if _vlm_mode != "vlm_nav" or _vlm_navigator is None:
+        return {"mode": "manual"}
+
+    obs = _nav_obs
+
+    # Run perception pipeline for occupancy grid
+    pipeline = _run_perception_pipeline(obs)
+    (vo_est, fwd_det, rear_det, occ_grid,
+     _fwd_pc, _rear_pc, _merged_pc, rear_rot) = pipeline
+
+    # Check for rear obstacles
+    rear_warning = (
+        rear_det.obstacle_count > 0
+        and float(np.min(obs.rear_depth[obs.rear_depth > 0])) < 0.5
+        if np.any(obs.rear_depth > 0)
+        else False
+    )
+
+    # Execute one VLM step (pass occupancy grid + planners)
+    action, vlm_status = _vlm_navigator.step(
+        obs,
+        occ_grid,
+        rear_warning,
+        _vehicle.find_path,
+    )
+
+    # Execute the action
+    if not _vlm_navigator.is_done:
+        _nav_obs = _vehicle.step(action)
+
+    # Build status dict
+    status_dict = {
+        "mode": vlm_status.mode,
+        "instruction": vlm_status.instruction,
+        "goal_reached": vlm_status.goal_reached,
+        "steps_taken": vlm_status.steps_taken,
+        "vlm_calls": vlm_status.vlm_calls,
+        "last_vlm_reasoning": vlm_status.last_vlm_reasoning,
+        "confidence": vlm_status.confidence,
+        "target_visible": vlm_status.target_visible,
+        "termination_reason": vlm_status.termination_reason,
+        "current_pixel": list(vlm_status.current_pixel) if vlm_status.current_pixel else None,
+        "current_world_target": list(vlm_status.current_world_target) if vlm_status.current_world_target else None,
+        "target_valid": vlm_status.target_valid,
+        "target_failure_reason": vlm_status.target_failure_reason,
+        "depth_at_target": vlm_status.depth_at_target,
+        "action": action,
+    }
+
+    # Check if episode ended
+    if _vlm_navigator.is_done:
+        _vlm_mode = "manual"
+        logger.info(
+            "VLM nav ended: %s, steps=%d, vlm_calls=%d",
+            vlm_status.termination_reason,
+            vlm_status.steps_taken,
+            vlm_status.vlm_calls,
+        )
+
+    return status_dict
+
+
+def _stop_vlm_nav() -> dict:
+    """Stop VLM navigation and return to manual mode."""
+    global _vlm_mode, _vlm_instruction
+
+    if _vlm_mode == "vlm_nav" and _vlm_navigator is not None:
+        _vlm_navigator.reset()
+        logger.info("VLM nav stopped by user.")
+
+    _vlm_mode = "manual"
+    _vlm_instruction = None
+    return {"mode": "manual"}
 
 
 @app.websocket("/ws")
@@ -491,7 +962,37 @@ async def websocket_endpoint(ws: WebSocket):
             msg = json.loads(raw)
             msg_type = msg.get("type", "")
 
-            if msg_type == "reset":
+            if msg_type == "change_scene":
+                # Change to a different scene
+                scene_id = msg.get("scene_id")
+                if not scene_id:
+                    await ws.send_text(json.dumps({"error": "No scene_id provided"}))
+                    continue
+
+                if scene_id == _current_scene_id:
+                    # Already on this scene, just send current frame
+                    obs = _vehicle.get_initial_observations()
+                    frame = _build_frame(obs)
+                    frame["scene_changed"] = False
+                    frame["current_scene"] = _current_scene_id
+                    await ws.send_text(json.dumps(frame))
+                    continue
+
+                success = _reinitialize_simulator(scene_id)
+                if not success:
+                    await ws.send_text(json.dumps({
+                        "error": f"Failed to load scene: {scene_id}",
+                        "current_scene": _current_scene_id,
+                    }))
+                    continue
+
+                obs = _vehicle.get_initial_observations()
+                frame = _build_frame(obs)
+                frame["scene_changed"] = True
+                frame["current_scene"] = _current_scene_id
+                await ws.send_text(json.dumps(frame))
+
+            elif msg_type == "reset":
                 # Reset works in both modes
                 global _nav_mode, _nav_pipeline_cache
                 _nav_mode = "manual"
@@ -522,6 +1023,32 @@ async def websocket_endpoint(ws: WebSocket):
                 goal_coords = msg.get("goal")
                 goal = np.array(goal_coords, dtype=np.float64) if goal_coords else None
                 _start_autonomous_nav(goal)
+                obs = _nav_obs if _nav_obs is not None else _vehicle.get_initial_observations()
+                frame = _build_frame(obs)
+                await ws.send_text(json.dumps(frame))
+
+            elif msg_type == "start_nav_to_object":
+                # Start autonomous navigation to semantic object
+                object_id = msg.get("object_id")
+                logger.info("start_nav_to_object: received object_id=%s (type=%s)", object_id, type(object_id).__name__)
+                if _semantic_index is None:
+                    await ws.send_text(json.dumps({"error": "No semantic data for this scene"}))
+                    continue
+                logger.info("_semantic_index has %d objects, keys sample: %s",
+                           len(_semantic_index.objects),
+                           list(_semantic_index.objects.keys())[:5])
+                if object_id not in _semantic_index.objects:
+                    await ws.send_text(json.dumps({"error": f"Object {object_id} not found"}))
+                    continue
+                obj = _semantic_index.objects[object_id]
+                logger.info("Looked up object_id=%s -> obj.label=%s, obj.instance_name=%s",
+                           object_id, obj.label, obj.instance_name)
+                if obj.navmesh_position is None:
+                    await ws.send_text(json.dumps({"error": f"{obj.instance_name} is not navigable"}))
+                    continue
+                logger.info("Starting navigation to %s at %s (centroid=%s)",
+                           obj.instance_name, obj.navmesh_position, obj.centroid)
+                _start_autonomous_nav(obj.navmesh_position)
                 obs = _nav_obs if _nav_obs is not None else _vehicle.get_initial_observations()
                 frame = _build_frame(obs)
                 await ws.send_text(json.dumps(frame))
@@ -559,10 +1086,119 @@ async def websocket_endpoint(ws: WebSocket):
                     frame = _build_frame(obs)
                     await ws.send_text(json.dumps(frame))
 
+            # M5 VLM navigation handlers
+            elif msg_type == "start_vlm_nav":
+                instruction = msg.get("instruction", "explore the environment")
+                result = _start_vlm_nav(instruction)
+                if "error" in result:
+                    await ws.send_text(json.dumps({"error": result["error"]}))
+                    continue
+                obs = _nav_obs if _nav_obs is not None else _vehicle.get_initial_observations()
+                frame = _build_frame(obs)
+                frame["vlm_status"] = {
+                    "mode": "vlm_nav",
+                    "instruction": instruction,
+                    "goal_reached": False,
+                    "steps_taken": 0,
+                    "vlm_calls": 0,
+                    "last_vlm_reasoning": "",
+                    "confidence": 0.0,
+                    "target_visible": False,
+                    "termination_reason": None,
+                    "current_pixel": None,
+                    "current_world_target": None,
+                    "target_valid": False,
+                    "target_failure_reason": None,
+                    "depth_at_target": 0.0,
+                    "action": None,
+                }
+                await ws.send_text(json.dumps(frame))
+
+            elif msg_type == "vlm_tick":
+                if _vlm_mode == "vlm_nav":
+                    vlm_dict = _vlm_tick()
+                    obs = _nav_obs if _nav_obs is not None else _vehicle.get_initial_observations()
+                    frame = _build_frame(obs)
+                    frame["vlm_status"] = vlm_dict
+                    await ws.send_text(json.dumps(frame))
+                else:
+                    # Not in VLM mode, just return current state
+                    obs = _vehicle.get_initial_observations()
+                    frame = _build_frame(obs)
+                    await ws.send_text(json.dumps(frame))
+
+            elif msg_type == "stop_vlm_nav":
+                _stop_vlm_nav()
+                obs = _vehicle.get_initial_observations()
+                frame = _build_frame(obs)
+                frame["vlm_status"] = {"mode": "manual"}
+                await ws.send_text(json.dumps(frame))
+
+            elif msg_type == "project_pixel":
+                # Project a pixel coordinate from forward camera to navmesh
+                u = msg.get("u", 0)
+                v = msg.get("v", 0)
+                logger.info("project_pixel: u=%d, v=%d", u, v)
+
+                obs = _vehicle.get_initial_observations()
+                proj_result = pixel_to_world(
+                    u, v,
+                    obs.depth,
+                    obs.state.position,
+                    obs.state.rotation,
+                )
+                logger.info(
+                    "project_pixel result: valid=%s, depth=%.2f, reason=%s",
+                    proj_result.is_valid, proj_result.depth_value,
+                    proj_result.failure_reason,
+                )
+
+                projection_data = {
+                    "is_valid": False,
+                    "pixel": [u, v],
+                    "world_point": None,
+                    "navmesh_point": None,
+                    "depth_value": proj_result.depth_value,
+                    "failure_reason": proj_result.failure_reason,
+                }
+
+                if proj_result.is_valid and proj_result.world_point is not None:
+                    logger.info(
+                        "project_pixel world_point: [%.2f, %.2f, %.2f]",
+                        proj_result.world_point[0],
+                        proj_result.world_point[1],
+                        proj_result.world_point[2],
+                    )
+                    # Snap to navmesh
+                    snapped, snap_ok, snap_reason = snap_to_navmesh(
+                        proj_result.world_point,
+                        _vehicle.pathfinder,
+                        max_distance=2.0,
+                    )
+                    projection_data["world_point"] = proj_result.world_point.tolist()
+                    logger.info(
+                        "project_pixel snap: ok=%s, reason=%s",
+                        snap_ok, snap_reason,
+                    )
+
+                    if snap_ok and snapped is not None:
+                        projection_data["is_valid"] = True
+                        projection_data["navmesh_point"] = snapped.tolist()
+                        logger.info(
+                            "project_pixel navmesh_point: [%.2f, %.2f, %.2f]",
+                            snapped[0], snapped[1], snapped[2],
+                        )
+                    else:
+                        projection_data["failure_reason"] = snap_reason or "snap_failed"
+
+                frame = _build_frame(obs)
+                frame["projection_result"] = projection_data
+                await ws.send_text(json.dumps(frame))
+
             elif "action" in msg:
-                # Manual control: ignore during autonomous mode
-                if _nav_mode == "autonomous":
-                    logger.debug("Ignoring manual action during autonomous mode.")
+                # Manual control: ignore during autonomous or VLM mode
+                if _nav_mode == "autonomous" or _vlm_mode == "vlm_nav":
+                    logger.debug("Ignoring manual action during autonomous/VLM mode.")
                     continue
                 action = msg["action"]
                 obs = _vehicle.step(action)
