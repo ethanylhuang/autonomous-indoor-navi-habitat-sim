@@ -13,9 +13,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from src.vlm.prompts import (
+    CLUSTERED_SELECTION_SYSTEM_PROMPT,
     CONSTRAINED_SELECTION_SYSTEM_PROMPT,
     NAVIGATION_SYSTEM_PROMPT,
     PIXEL_NAVIGATION_SYSTEM_PROMPT,
+    build_clustered_selection_prompt,
     build_confirmation_prompt,
     build_constrained_selection_prompt,
     build_navigation_prompt,
@@ -373,13 +375,15 @@ class VLMClient:
     def select_object_constrained(
         self,
         instruction: str,
-        candidates: list,
+        candidates: list = None,
+        clustered = None,
     ):
         """Query VLM for constrained object selection from candidate list.
 
         Args:
             instruction: Natural language instruction (e.g., "find something to sit on").
-            candidates: List of ObjectCandidate instances.
+            candidates: List of ObjectCandidate instances (for non-clustered selection).
+            clustered: Optional ClusteredCandidates for spatially-aware selection.
 
         Returns:
             ConstrainedVLMResponse with selected object or no_match indicator.
@@ -387,13 +391,27 @@ class VLMClient:
         from src.vlm.constrained import ConstrainedVLMResponse
 
         client = self._get_client()
-        user_prompt = build_constrained_selection_prompt(instruction, candidates)
+
+        # Choose system prompt and build user prompt based on clustering
+        if clustered is not None:
+            system_prompt = CLUSTERED_SELECTION_SYSTEM_PROMPT
+            user_prompt = build_clustered_selection_prompt(instruction, clustered)
+            # Flatten all candidates for response parsing
+            all_candidates = []
+            for cluster_candidates in clustered.candidates_by_cluster.values():
+                all_candidates.extend(cluster_candidates)
+            all_candidates.extend(clustered.unclustered_candidates)
+            candidates_for_parsing = all_candidates
+        else:
+            system_prompt = CONSTRAINED_SELECTION_SYSTEM_PROMPT
+            user_prompt = build_constrained_selection_prompt(instruction, candidates)
+            candidates_for_parsing = candidates
 
         try:
             response = client.messages.create(
                 model=self._model,
                 max_tokens=256,
-                system=CONSTRAINED_SELECTION_SYSTEM_PROMPT,
+                system=system_prompt,
                 messages=[
                     {
                         "role": "user",
@@ -406,7 +424,9 @@ class VLMClient:
             logger.debug("VLM constrained selection raw response: %s", response_text)
 
             # Parse JSON response
-            return self._parse_constrained_response(response_text, candidates)
+            return self._parse_constrained_response(
+                response_text, candidates_for_parsing, clustered
+            )
 
         except Exception as e:
             logger.error("VLM constrained selection query failed: %s", e)
@@ -423,12 +443,14 @@ class VLMClient:
         self,
         response_text: str,
         candidates: list,
+        clustered = None,
     ):
         """Parse VLM JSON response for constrained object selection.
 
         Args:
             response_text: Raw VLM response text.
             candidates: List of ObjectCandidate instances.
+            clustered: Optional ClusteredCandidates (for region extraction).
 
         Returns:
             ConstrainedVLMResponse.
@@ -443,16 +465,8 @@ class VLMClient:
 
             data = json.loads(response_text)
 
-            # Check for no_match flag
-            if data.get("none_match", False):
-                return ConstrainedVLMResponse(
-                    selected_object_id=None,
-                    selected_label="",
-                    reasoning=data.get("reasoning", "No matching object"),
-                    confidence=float(data.get("confidence", 0.0)),
-                    is_valid=False,
-                    no_match_reason="none_match",
-                )
+            # Extract optional region field (for clustered selection)
+            selected_region = data.get("region", None)
 
             # Extract selected label and instance number
             selected_label = data.get("selected_label", "").lower().strip()
@@ -460,15 +474,25 @@ class VLMClient:
             reasoning = data.get("reasoning", "")
             confidence = float(data.get("confidence", 0.5))
 
-            if not selected_label:
-                return ConstrainedVLMResponse(
-                    selected_object_id=None,
-                    selected_label="",
-                    reasoning="Empty label in response",
-                    confidence=0.0,
-                    is_valid=False,
-                    no_match_reason="empty_label",
-                )
+            # Fallback: if VLM returns none_match or empty label, pick nearest object
+            if data.get("none_match", False) or not selected_label:
+                if candidates:
+                    # Sort by distance and pick nearest
+                    sorted_candidates = sorted(candidates, key=lambda c: c.distance_from_agent)
+                    nearest = sorted_candidates[0]
+                    logger.warning(
+                        "VLM returned no selection, falling back to nearest object: %s",
+                        nearest.label,
+                    )
+                    return ConstrainedVLMResponse(
+                        selected_object_id=nearest.object_id,
+                        selected_label=nearest.label,
+                        reasoning=f"Fallback: nearest object ({reasoning})",
+                        confidence=0.3,
+                        is_valid=True,
+                        no_match_reason=None,
+                        selected_region=selected_region,
+                    )
 
             # Match label to candidates
             matching_candidates = [
@@ -486,6 +510,7 @@ class VLMClient:
                     confidence=confidence,
                     is_valid=False,
                     no_match_reason="label_not_found",
+                    selected_region=selected_region,
                 )
 
             # Select specific instance (clamp to available instances)
@@ -500,6 +525,7 @@ class VLMClient:
                 confidence=confidence,
                 is_valid=True,
                 no_match_reason=None,
+                selected_region=selected_region,
             )
 
         except (json.JSONDecodeError, KeyError, ValueError) as e:

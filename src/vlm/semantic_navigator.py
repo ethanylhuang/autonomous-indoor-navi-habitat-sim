@@ -156,12 +156,18 @@ class SemanticConstrainedNavigator:
         Returns:
             SemanticNavStatus after selection.
         """
-        # Build candidate list (only reachable objects)
-        candidates = self._candidate_builder.build_candidates(
+        # Build clustered candidate list (only reachable objects)
+        clustered = self._candidate_builder.build_clustered_candidates(
             self._semantic_index, agent_position, pathfinder=self._pathfinder
         )
 
-        if not candidates:
+        # Check if we have any candidates
+        total_candidates = (
+            sum(len(cands) for cands in clustered.candidates_by_cluster.values())
+            + len(clustered.unclustered_candidates)
+        )
+
+        if total_candidates == 0:
             logger.warning("No navigable objects in scene for selection")
             self._phase = "completed"
             self._vlm_response = ConstrainedVLMResponse(
@@ -174,25 +180,36 @@ class SemanticConstrainedNavigator:
             )
             return self._build_status()
 
-        # Log candidates being sent to VLM
-        unique_labels = sorted(set(c.label for c in candidates))
+        # Log clustering results
         logger.info(
-            "Sending %d candidates to VLM (%d unique labels): %s",
-            len(candidates),
-            len(unique_labels),
-            ", ".join(unique_labels[:20]) + ("..." if len(unique_labels) > 20 else ""),
+            "Clustered %d objects into %d regions (%d unclustered)",
+            total_candidates,
+            len(clustered.clusters),
+            len(clustered.unclustered_candidates),
         )
+        for cluster in clustered.clusters:
+            logger.info(
+                "  %s: %d objects at %.1fm",
+                cluster.cluster_label,
+                len(cluster.object_ids),
+                cluster.distance_from_agent,
+            )
+            # Log objects in each region
+            region_candidates = clustered.candidates_by_cluster[cluster.cluster_id]
+            labels = [c.label for c in region_candidates]
+            logger.info("    Objects: %s", ", ".join(labels))
 
-        # Query VLM
+        # Query VLM with clustered candidates
         self._vlm_calls += 1
         response = self._vlm.select_object_constrained(
-            self._instruction, candidates
+            self._instruction, clustered=clustered
         )
         self._vlm_response = response
 
         logger.info(
-            "VLM selection: label='%s', confidence=%.2f, reasoning='%s'",
+            "VLM selection: label='%s', region='%s', confidence=%.2f, reasoning='%s'",
             response.selected_label,
+            response.selected_region or "N/A",
             response.confidence,
             response.reasoning,
         )

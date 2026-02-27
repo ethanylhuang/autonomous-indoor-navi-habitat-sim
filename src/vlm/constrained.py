@@ -5,7 +5,7 @@ constrained selection prompt to prevent hallucination.
 """
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 from numpy.typing import NDArray
@@ -35,6 +35,7 @@ class ConstrainedVLMResponse:
     confidence: float  # 0-1
     is_valid: bool
     no_match_reason: Optional[str]  # "none_match", "parse_error", etc.
+    selected_region: Optional[str] = None  # "Region A", "Region B" (for clustered selection)
 
 
 class ObjectCandidateBuilder:
@@ -100,3 +101,39 @@ class ObjectCandidateBuilder:
 
         # Cap at max_candidates
         return candidates[: self._max_candidates]
+
+    def build_clustered_candidates(
+        self,
+        semantic_index: SemanticSceneIndex,
+        agent_position: NDArray[np.float64],
+        pathfinder=None,
+        eps: float = 1.5,
+        min_samples: int = 2,
+    ):
+        """Build spatially clustered candidates from semantic index.
+
+        Args:
+            semantic_index: Scene semantic index.
+            agent_position: [3] current agent world position.
+            pathfinder: Optional pathfinder to filter reachable objects only.
+            eps: DBSCAN epsilon parameter (meters).
+            min_samples: Minimum samples for DBSCAN clustering.
+
+        Returns:
+            ClusteredCandidates with spatial grouping and room inference.
+        """
+        from src.vlm.clustering import ClusteredCandidates, SpatialClusterer
+
+        # First build standard candidate list
+        candidates = self.build_candidates(semantic_index, agent_position, pathfinder)
+
+        if not candidates:
+            return ClusteredCandidates(
+                clusters=[],
+                candidates_by_cluster={},
+                unclustered_candidates=[],
+            )
+
+        # Cluster candidates spatially
+        clusterer = SpatialClusterer(eps=eps, min_samples=min_samples)
+        return clusterer.cluster_candidates(candidates, agent_position)

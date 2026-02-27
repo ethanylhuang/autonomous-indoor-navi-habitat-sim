@@ -135,6 +135,24 @@ Output format:
 }"""
 
 
+CLUSTERED_SELECTION_SYSTEM_PROMPT = """You are an object selection assistant for an indoor robot.
+Given a user instruction and a list of available objects grouped by spatial region, select the object that best matches the instruction.
+
+Objects in the same region are physically near each other. Distances show how far each object is from the robot.
+
+RULES:
+1. Always select an object from the list - if no exact match, pick the closest alternative (e.g., "sofa" for "something to sit on")
+2. Output valid JSON only
+
+Output format:
+{
+  "selected_label": "<object label from list>",
+  "region": "<Region A/B/C or unclustered>",
+  "reasoning": "<brief explanation>",
+  "confidence": <0.0 to 1.0>
+}"""
+
+
 def build_constrained_selection_prompt(
     instruction: str,
     candidates: list,
@@ -167,4 +185,48 @@ def build_constrained_selection_prompt(
             prompt += f"- {label} ({len(cands)} instances in regions: {', '.join(str(c.region_id) for c in cands)})\n"
 
     prompt += "\nWhich object best matches the instruction? Provide the label and instance number."
+    return prompt
+
+
+def build_clustered_selection_prompt(
+    instruction: str,
+    clustered: "ClusteredCandidates",  # type: ignore
+) -> str:
+    """Build user prompt for clustered object selection.
+
+    Args:
+        instruction: Natural language instruction (e.g., "find something to sit on").
+        clustered: ClusteredCandidates with spatial grouping.
+
+    Returns:
+        Formatted user prompt string with clustered objects.
+    """
+    prompt = f"Instruction: {instruction}\n\n"
+    prompt += "Objects grouped by spatial proximity:\n\n"
+
+    # Show each cluster
+    for cluster in clustered.clusters:
+        room_label = f" [{cluster.inferred_room_type}]" if cluster.inferred_room_type else ""
+        prompt += f"{cluster.cluster_label} ({cluster.distance_from_agent:.1f}m away){room_label}:\n"
+
+        # Sort candidates in cluster by distance
+        candidates_in_cluster = clustered.candidates_by_cluster[cluster.cluster_id]
+        candidates_in_cluster = sorted(candidates_in_cluster, key=lambda c: c.distance_from_agent)
+
+        for candidate in candidates_in_cluster:
+            prompt += f"  - {candidate.label} ({candidate.distance_from_agent:.1f}m)\n"
+
+        prompt += "\n"
+
+    # Show unclustered objects
+    if clustered.unclustered_candidates:
+        prompt += "Unclustered:\n"
+        unclustered_sorted = sorted(
+            clustered.unclustered_candidates, key=lambda c: c.distance_from_agent
+        )
+        for candidate in unclustered_sorted:
+            prompt += f"  - {candidate.label} ({candidate.distance_from_agent:.1f}m)\n"
+        prompt += "\n"
+
+    prompt += "Select the object that best matches the instruction."
     return prompt

@@ -375,8 +375,9 @@ def build_semantic_index_from_sim(
 
             # Get region_id from sim_obj if available
             region_id = 0
-            if hasattr(sim_obj, "region") and sim_obj.region:
-                region_id = sim_obj.region.index if hasattr(sim_obj.region, "index") else 0
+            if hasattr(sim_obj, "region") and sim_obj.region is not None:
+                # SemanticRegion uses 'id' attribute, not 'index'
+                region_id = sim_obj.region.id if hasattr(sim_obj.region, "id") else 0
 
             obj = SemanticObject(
                 object_id=object_id,
