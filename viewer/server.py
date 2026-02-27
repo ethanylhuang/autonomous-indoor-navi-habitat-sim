@@ -73,6 +73,10 @@ from src.perception.semantic_scene import (
     get_navigable_objects,
 )
 
+# M5 Semantic constrained navigation
+from src.vlm.semantic_navigator import SemanticConstrainedNavigator
+from src.vlm.constrained import ObjectCandidateBuilder
+
 # Configure logging to show INFO level for VLM debugging
 logging.basicConfig(level=logging.INFO, format="%(name)s - %(levelname)s - %(message)s")
 
@@ -191,6 +195,9 @@ _vlm_instruction: Optional[str] = None
 # Semantic scene index (built on scene load for HM3D scenes)
 _semantic_index: Optional[SemanticSceneIndex] = None
 
+# M5 Semantic navigation state (constrained VLM selection)
+_semantic_navigator = None  # SemanticConstrainedNavigator instance
+
 
 def _compute_rear_rotation(agent_rotation: NDArray[np.float64]) -> NDArray[np.float64]:
     """Compute rear sensor world rotation: agent rotation * 180-degree Y offset."""
@@ -239,10 +246,26 @@ async def lifespan(app: FastAPI):
         _vlm_client = None
         _vlm_navigator = None
     # Build semantic index for initial scene (if applicable)
-    global _semantic_index
+    global _semantic_index, _semantic_navigator
     _semantic_index = build_semantic_index_from_sim(_vehicle)
     if _semantic_index is not None:
         logger.info("Semantic index built: %d objects", len(_semantic_index.objects))
+    # M5 Semantic constrained navigator (optional - requires VLM + semantic index)
+    if _vlm_client is not None and _semantic_index is not None:
+        try:
+            candidate_builder = ObjectCandidateBuilder(max_candidates=100)
+            _semantic_navigator = SemanticConstrainedNavigator(
+                vlm_client=_vlm_client,
+                semantic_index=_semantic_index,
+                global_planner=_nav_global_planner,
+                controller=_nav_controller,
+                candidate_builder=candidate_builder,
+                pathfinder=_vehicle.pathfinder,
+            )
+            logger.info("Semantic constrained navigator initialized.")
+        except Exception as e:
+            logger.warning("Semantic navigator not initialized: %s", e)
+            _semantic_navigator = None
     logger.info("Vehicle ready.")
     yield
     logger.info("Shutting down Vehicle...")
@@ -434,6 +457,26 @@ def _reinitialize_simulator(scene_id: str) -> bool:
         )
     else:
         logger.info("No semantic data available for this scene.")
+
+    # Reinitialize semantic navigator if VLM and semantic index are available
+    global _semantic_navigator
+    if _vlm_client is not None and _semantic_index is not None:
+        try:
+            candidate_builder = ObjectCandidateBuilder(max_candidates=100)
+            _semantic_navigator = SemanticConstrainedNavigator(
+                vlm_client=_vlm_client,
+                semantic_index=_semantic_index,
+                global_planner=_nav_global_planner,
+                controller=_nav_controller,
+                candidate_builder=candidate_builder,
+                pathfinder=_vehicle.pathfinder,
+            )
+            logger.info("Semantic constrained navigator reinitialized for new scene.")
+        except Exception as e:
+            logger.warning("Could not reinitialize semantic navigator: %s", e)
+            _semantic_navigator = None
+    else:
+        _semantic_navigator = None
 
     logger.info("Simulator reinitialized successfully.")
     return True
@@ -942,6 +985,171 @@ def _stop_vlm_nav() -> dict:
     return {"mode": "manual"}
 
 
+# ---------------------------------------------------------------------------
+# M5 Semantic Constrained Navigation Functions
+# ---------------------------------------------------------------------------
+
+
+def _start_semantic_nav(instruction: str) -> dict:
+    """Start semantic navigation with constrained VLM object selection.
+
+    Args:
+        instruction: Natural language instruction (e.g., "find something to sit on").
+
+    Returns:
+        Dict with status or error.
+    """
+    global _nav_mode, _vlm_mode, _nav_obs
+
+    if _semantic_navigator is None:
+        return {"error": "Semantic navigator not available (missing VLM or semantic index)"}
+
+    # Stop any existing navigation
+    if _nav_mode == "autonomous":
+        _stop_autonomous_nav()
+    if _vlm_mode == "vlm_nav":
+        _stop_vlm_nav()
+
+    # Get initial observations
+    obs = _vehicle.get_initial_observations()
+
+    # Initialize EKF state estimator
+    start_pos = obs.state.position.copy()
+    start_yaw = yaw_from_quaternion(obs.state.rotation)
+    _nav_estimator.initialize(start_pos, start_yaw)
+
+    # Start episode (VLM selection + path planning happens here)
+    status = _semantic_navigator.start_episode(
+        instruction,
+        obs.state.position,
+        obs.state.rotation,
+    )
+
+    # Check if selection succeeded
+    if status.phase == "completed":
+        # Selection failed
+        reason = status.termination_reason or "unknown"
+        logger.warning("Semantic nav selection failed: %s", reason)
+        return {"error": f"Object selection failed: {reason}"}
+
+    # Selection succeeded, navigation started
+    _nav_mode = "autonomous"  # Reuse autonomous mode for execution
+    _nav_obs = obs
+
+    logger.info(
+        "Semantic nav started: '%s' -> '%s' (ID %d)",
+        instruction,
+        status.selected_object_label,
+        status.selected_object_id,
+    )
+
+    return {
+        "status": "started",
+        "instruction": instruction,
+        "selected_object": status.selected_object_label,
+        "selected_id": status.selected_object_id,
+        "vlm_reasoning": status.vlm_reasoning,
+        "confidence": status.vlm_confidence,
+    }
+
+
+def _semantic_nav_tick() -> dict:
+    """Execute one semantic navigation step.
+
+    Returns:
+        Semantic nav status dict for the frame.
+    """
+    global _nav_mode, _nav_obs
+
+    if _semantic_navigator is None or _semantic_navigator.is_done:
+        return {"mode": "manual", "phase": "idle"}
+
+    obs = _nav_obs
+
+    # Run perception pipeline for occupancy grid + state estimation
+    pipeline = _run_perception_pipeline(obs)
+    (vo_est, fwd_det, rear_det, occ_grid,
+     _fwd_pc, _rear_pc, _merged_pc, rear_rot) = pipeline
+
+    # Update state estimator
+    _nav_estimator.predict(obs.imu, dt=1.0)
+    if vo_est.is_valid:
+        pose_est = _nav_estimator.update_vo(vo_est)
+    else:
+        pose_est = _nav_estimator.get_estimate()
+
+    # Check for rear obstacles
+    rear_warning = (
+        rear_det.obstacle_count > 0
+        and float(np.min(obs.rear_depth[obs.rear_depth > 0])) < 0.5
+        if np.any(obs.rear_depth > 0)
+        else False
+    )
+
+    # Check collision
+    collided = obs.state.collided
+
+    # Execute one navigation step
+    action, status = _semantic_navigator.step(
+        pose_est,
+        occ_grid,
+        rear_warning,
+        collided,
+    )
+
+    # Execute the action
+    if not _semantic_navigator.is_done:
+        # Parse continuous action: "turn_to:{yaw}" or "turn_to:{yaw}:move"
+        parts = action.split(":")
+        target_yaw = float(parts[1])
+        move_forward = len(parts) > 2 and parts[2] == "move"
+        _nav_obs = _vehicle.step_with_heading(target_yaw, move_forward)
+
+    # Build status dict
+    status_dict = {
+        "mode": status.mode,
+        "instruction": status.instruction,
+        "phase": status.phase,
+        "selected_object_label": status.selected_object_label,
+        "selected_object_id": status.selected_object_id,
+        "goal_position": status.goal_position,
+        "goal_reached": status.goal_reached,
+        "steps_taken": status.steps_taken,
+        "vlm_calls": status.vlm_calls,
+        "vlm_reasoning": status.vlm_reasoning,
+        "vlm_confidence": status.vlm_confidence,
+        "termination_reason": status.termination_reason,
+        "distance_to_goal": status.distance_to_goal,
+        "spl": status.spl,
+        "action": action,
+    }
+
+    # Check if episode ended
+    if _semantic_navigator.is_done:
+        _nav_mode = "manual"
+        metrics = _semantic_navigator.finish_episode()
+        logger.info(
+            "Semantic nav ended: %s, SPL=%.3f, steps=%d",
+            metrics.termination_reason,
+            metrics.spl,
+            metrics.steps,
+        )
+
+    return status_dict
+
+
+def _stop_semantic_nav() -> dict:
+    """Stop semantic navigation and return to manual mode."""
+    global _nav_mode
+
+    if _semantic_navigator is not None and not _semantic_navigator.is_done:
+        _semantic_navigator.reset()
+        logger.info("Semantic nav stopped by user.")
+
+    _nav_mode = "manual"
+    return {"mode": "manual"}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     """WebSocket endpoint for real-time agent control."""
@@ -1129,6 +1337,62 @@ async def websocket_endpoint(ws: WebSocket):
 
             elif msg_type == "stop_vlm_nav":
                 _stop_vlm_nav()
+                obs = _vehicle.get_initial_observations()
+                frame = _build_frame(obs)
+                frame["vlm_status"] = {"mode": "manual"}
+                await ws.send_text(json.dumps(frame))
+
+            # M5 Semantic constrained navigation handlers
+            elif msg_type == "start_semantic_nav":
+                instruction = msg.get("instruction", "")
+                result = _start_semantic_nav(instruction)
+                if "error" in result:
+                    await ws.send_text(json.dumps({"error": result["error"]}))
+                    continue
+                obs = _nav_obs if _nav_obs is not None else _vehicle.get_initial_observations()
+                frame = _build_frame(obs)
+                frame["vlm_status"] = {
+                    "mode": "vlm_nav",
+                    "instruction": instruction,
+                    "goal_reached": False,
+                    "steps_taken": 0,
+                    "vlm_calls": 1,
+                    "last_vlm_reasoning": result.get("vlm_reasoning", ""),
+                    "confidence": result.get("confidence", 0.0),
+                    "target_visible": True,
+                    "termination_reason": None,
+                    "selected_object_label": result.get("selected_object"),
+                    "selected_object_id": result.get("selected_id"),
+                }
+                await ws.send_text(json.dumps(frame))
+
+            elif msg_type == "semantic_nav_tick":
+                if _nav_mode == "autonomous" and _semantic_navigator is not None and not _semantic_navigator.is_done:
+                    semantic_dict = _semantic_nav_tick()
+                    obs = _nav_obs if _nav_obs is not None else _vehicle.get_initial_observations()
+                    frame = _build_frame(obs)
+                    frame["vlm_status"] = {
+                        "mode": "vlm_nav" if semantic_dict.get("mode") == "semantic_nav" else "manual",
+                        "instruction": semantic_dict.get("instruction", ""),
+                        "goal_reached": semantic_dict.get("goal_reached", False),
+                        "steps_taken": semantic_dict.get("steps_taken", 0),
+                        "vlm_calls": semantic_dict.get("vlm_calls", 0),
+                        "last_vlm_reasoning": semantic_dict.get("vlm_reasoning", ""),
+                        "confidence": semantic_dict.get("vlm_confidence", 0.0),
+                        "target_visible": True,
+                        "termination_reason": semantic_dict.get("termination_reason"),
+                        "selected_object_label": semantic_dict.get("selected_object_label"),
+                        "selected_object_id": semantic_dict.get("selected_object_id"),
+                    }
+                    await ws.send_text(json.dumps(frame))
+                else:
+                    # Not in semantic nav mode, just return current state
+                    obs = _vehicle.get_initial_observations()
+                    frame = _build_frame(obs)
+                    await ws.send_text(json.dumps(frame))
+
+            elif msg_type == "stop_semantic_nav":
+                _stop_semantic_nav()
                 obs = _vehicle.get_initial_observations()
                 frame = _build_frame(obs)
                 frame["vlm_status"] = {"mode": "manual"}

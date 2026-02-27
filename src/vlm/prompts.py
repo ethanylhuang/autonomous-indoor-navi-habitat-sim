@@ -114,3 +114,57 @@ def build_pixel_navigation_prompt(
         prompt += f"Context: {context}\n"
     prompt += "\nWhere should the robot navigate? Provide pixel coordinates of a point on the floor/path."
     return prompt
+
+
+CONSTRAINED_SELECTION_SYSTEM_PROMPT = """You are an object selection assistant for an indoor robot.
+Given a user instruction and a list of available objects in the scene, select the SINGLE object that best matches what the user is looking for.
+
+RULES:
+1. You MUST choose from the provided list - no other objects exist
+2. If multiple objects could match, pick the most likely one
+3. If NO object matches the instruction, respond with "none_match": true
+4. Output valid JSON only
+
+Output format:
+{
+  "selected_label": "<object label from list>",
+  "instance_number": <int, default 1>,
+  "reasoning": "<1 sentence>",
+  "confidence": <0.0 to 1.0>,
+  "none_match": <true/false>
+}"""
+
+
+def build_constrained_selection_prompt(
+    instruction: str,
+    candidates: list,
+) -> str:
+    """Build user prompt for constrained object selection.
+
+    Args:
+        instruction: Natural language instruction (e.g., "find something to sit on").
+        candidates: List of ObjectCandidate instances.
+
+    Returns:
+        Formatted user prompt string with object list.
+    """
+    from collections import defaultdict
+
+    # Group candidates by label
+    label_to_candidates = defaultdict(list)
+    for candidate in candidates:
+        label_to_candidates[candidate.label].append(candidate)
+
+    # Build prompt
+    prompt = f"Instruction: {instruction}\n\n"
+    prompt += "Available objects in the scene:\n"
+
+    for label in sorted(label_to_candidates.keys()):
+        cands = label_to_candidates[label]
+        if len(cands) == 1:
+            prompt += f"- {label} (region {cands[0].region_id})\n"
+        else:
+            prompt += f"- {label} ({len(cands)} instances in regions: {', '.join(str(c.region_id) for c in cands)})\n"
+
+    prompt += "\nWhich object best matches the instruction? Provide the label and instance number."
+    return prompt

@@ -13,9 +13,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from src.vlm.prompts import (
+    CONSTRAINED_SELECTION_SYSTEM_PROMPT,
     NAVIGATION_SYSTEM_PROMPT,
     PIXEL_NAVIGATION_SYSTEM_PROMPT,
     build_confirmation_prompt,
+    build_constrained_selection_prompt,
     build_navigation_prompt,
     build_pixel_navigation_prompt,
 )
@@ -366,4 +368,147 @@ class VLMClient:
                     target_visible=False,
                 ),
                 goal_reached=False,
+            )
+
+    def select_object_constrained(
+        self,
+        instruction: str,
+        candidates: list,
+    ):
+        """Query VLM for constrained object selection from candidate list.
+
+        Args:
+            instruction: Natural language instruction (e.g., "find something to sit on").
+            candidates: List of ObjectCandidate instances.
+
+        Returns:
+            ConstrainedVLMResponse with selected object or no_match indicator.
+        """
+        from src.vlm.constrained import ConstrainedVLMResponse
+
+        client = self._get_client()
+        user_prompt = build_constrained_selection_prompt(instruction, candidates)
+
+        try:
+            response = client.messages.create(
+                model=self._model,
+                max_tokens=256,
+                system=CONSTRAINED_SELECTION_SYSTEM_PROMPT,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": user_prompt,
+                    }
+                ],
+            )
+
+            response_text = response.content[0].text.strip()
+            logger.debug("VLM constrained selection raw response: %s", response_text)
+
+            # Parse JSON response
+            return self._parse_constrained_response(response_text, candidates)
+
+        except Exception as e:
+            logger.error("VLM constrained selection query failed: %s", e)
+            return ConstrainedVLMResponse(
+                selected_object_id=None,
+                selected_label="",
+                reasoning=f"Query error: {e}",
+                confidence=0.0,
+                is_valid=False,
+                no_match_reason="api_error",
+            )
+
+    def _parse_constrained_response(
+        self,
+        response_text: str,
+        candidates: list,
+    ):
+        """Parse VLM JSON response for constrained object selection.
+
+        Args:
+            response_text: Raw VLM response text.
+            candidates: List of ObjectCandidate instances.
+
+        Returns:
+            ConstrainedVLMResponse.
+        """
+        from src.vlm.constrained import ConstrainedVLMResponse
+
+        try:
+            # Handle markdown code blocks
+            if response_text.startswith("```"):
+                lines = response_text.split("\n")
+                response_text = "\n".join(lines[1:-1])
+
+            data = json.loads(response_text)
+
+            # Check for no_match flag
+            if data.get("none_match", False):
+                return ConstrainedVLMResponse(
+                    selected_object_id=None,
+                    selected_label="",
+                    reasoning=data.get("reasoning", "No matching object"),
+                    confidence=float(data.get("confidence", 0.0)),
+                    is_valid=False,
+                    no_match_reason="none_match",
+                )
+
+            # Extract selected label and instance number
+            selected_label = data.get("selected_label", "").lower().strip()
+            instance_number = int(data.get("instance_number", 1))
+            reasoning = data.get("reasoning", "")
+            confidence = float(data.get("confidence", 0.5))
+
+            if not selected_label:
+                return ConstrainedVLMResponse(
+                    selected_object_id=None,
+                    selected_label="",
+                    reasoning="Empty label in response",
+                    confidence=0.0,
+                    is_valid=False,
+                    no_match_reason="empty_label",
+                )
+
+            # Match label to candidates
+            matching_candidates = [
+                c for c in candidates if c.label.lower() == selected_label
+            ]
+
+            if not matching_candidates:
+                logger.warning(
+                    "VLM selected label '%s' not in candidate list", selected_label
+                )
+                return ConstrainedVLMResponse(
+                    selected_object_id=None,
+                    selected_label=selected_label,
+                    reasoning=reasoning,
+                    confidence=confidence,
+                    is_valid=False,
+                    no_match_reason="label_not_found",
+                )
+
+            # Select specific instance (clamp to available instances)
+            instance_idx = min(instance_number - 1, len(matching_candidates) - 1)
+            instance_idx = max(0, instance_idx)
+            selected = matching_candidates[instance_idx]
+
+            return ConstrainedVLMResponse(
+                selected_object_id=selected.object_id,
+                selected_label=selected.label,
+                reasoning=reasoning,
+                confidence=confidence,
+                is_valid=True,
+                no_match_reason=None,
+            )
+
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            logger.error("Failed to parse VLM constrained response: %s", e)
+            return ConstrainedVLMResponse(
+                selected_object_id=None,
+                selected_label="",
+                reasoning=f"Parse error: {e}",
+                confidence=0.0,
+                is_valid=False,
+                no_match_reason="parse_error",
             )

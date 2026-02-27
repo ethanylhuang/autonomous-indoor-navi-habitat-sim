@@ -545,7 +545,7 @@
         waitingForResponse = true;
         vlmResult.style.display = "none";
         setVlmMode("vlm_nav");
-        ws.send(JSON.stringify({ type: "start_vlm_nav", instruction: instruction.trim() }));
+        ws.send(JSON.stringify({ type: "start_semantic_nav", instruction: instruction.trim() }));
     }
 
     function sendStopVlmNav() {
@@ -553,7 +553,7 @@
             return;
         }
         waitingForResponse = true;
-        ws.send(JSON.stringify({ type: "stop_vlm_nav" }));
+        ws.send(JSON.stringify({ type: "stop_semantic_nav" }));
         setVlmMode("manual");
     }
 
@@ -563,7 +563,7 @@
         }
         if (navMode !== "vlm_nav") return;
         waitingForResponse = true;
-        ws.send(JSON.stringify({ type: "vlm_tick" }));
+        ws.send(JSON.stringify({ type: "semantic_nav_tick" }));
     }
 
     // -- NavMesh click-to-pin handler ------------------------------------
