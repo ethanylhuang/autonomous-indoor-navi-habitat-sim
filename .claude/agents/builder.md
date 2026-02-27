@@ -6,9 +6,12 @@ You are the **Builder** in a 3-stage quality pipeline. You write code. Nothing e
 
 **Autonomous Indoor Vehicle** built on Meta's Habitat-Sim (Python 3.9+).
 
+**Milestones:** M1-M3 complete (sensors, perception, classical nav). M4 infrastructure ready (RL env, policy, train script). M5 in progress (semantic/VLM).
+
 ### Tech Stack & Conventions
 
-- **Core imports:** `habitat_sim`, `numpy`, `scipy` (for spatial math, filters)
+- **Core imports:** `habitat_sim`, `numpy`, `scipy`, `opencv-python` (for VO)
+- **RL stack:** `gymnasium`, `stable-baselines3` (PPO with custom feature extractor)
 - **Simulator API patterns:**
   - Sensor config: `habitat_sim.CameraSensorSpec()` with `.uuid`, `.sensor_type`, `.resolution`, `.position`, `.hfov`
   - Agent config: `habitat_sim.agent.AgentConfiguration()` with `.sensor_specifications`, `.radius`, `.height`, `.action_space`
@@ -26,33 +29,41 @@ You are the **Builder** in a 3-stage quality pipeline. You write code. Nothing e
 
 ```
 configs/
-├── sensor_rig.py            # Sensor spec builders, resolution/FOV constants
-└── sim_config.py            # Simulator + agent configuration factory
+├── sensor_rig.py            # 6-sensor spec definitions (RGB, depth, semantic x2)
+├── sim_config.py            # Simulator + agent configuration factory
+└── rl_config.py             # RL hyperparameters
 
 src/
 ├── sensors/
 │   ├── lidar.py             # Depth → point cloud conversion
-│   ├── imu.py               # State-differencing IMU
-│   └── cameras.py           # Camera config helpers, image preprocessing
+│   └── imu.py               # State-differencing IMU
 ├── perception/
 │   ├── occupancy_grid.py    # Fused grid (LiDAR + visual)
-│   ├── visual_odometry.py   # Feature-based VO from RGB frames
-│   └── obstacle_detector.py # Semantic obstacle detection
+│   ├── visual_odometry.py   # ORB + RANSAC VO from RGB frames
+│   ├── obstacle_detector.py # Semantic obstacle detection
+│   └── semantic_scene.py    # HM3D semantic scene parsing
 ├── planning/
-│   ├── global_planner.py    # NavMesh pathfinding wrapper
-│   └── local_planner.py     # DWA / obstacle avoidance
+│   ├── global_planner.py    # NavMesh pathfinding + corner smoothing
+│   └── local_planner.py     # Rule-based obstacle avoidance
 ├── control/
-│   └── controller.py        # Waypoint → action conversion
+│   └── controller.py        # Full nav loop orchestration
 ├── state_estimation/
-│   └── estimator.py         # IMU + VO fusion (EKF)
+│   └── estimator.py         # EKF (IMU + VO fusion)
 ├── rl/
-│   ├── env.py               # Gym-style env wrapper
-│   ├── policy.py            # Policy network
-│   └── train.py             # Training loop
-└── vehicle.py               # Agent setup, sensor mounting, main loop
+│   ├── env.py               # Gymnasium env wrapper
+│   ├── policy.py            # Multi-modal feature extractor (SB3)
+│   └── train.py             # PPO training loop
+├── vlm/                     # M5 (in progress)
+│   ├── client.py            # VLM API wrapper
+│   ├── navigator.py         # Hierarchical VLM + classical planner
+│   └── projection.py        # Pixel → world coordinate projection
+├── utils/
+│   └── transforms.py        # Shared quaternion/camera/angle utilities
+└── vehicle.py               # Simulator facade, sensor mounting, stepping
 
-tests/
-scripts/
+viewer/                      # FastAPI + WebSocket browser dashboard
+tests/                       # 20+ test files
+scripts/                     # run_classical.py, run_rl.py
 ```
 
 ### Coding Conventions

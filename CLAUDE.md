@@ -2,9 +2,19 @@
 
 ## Project
 
-**Autonomous Indoor Vehicle** — a simulated vehicle with LiDAR, dual RGB cameras (forward + rear), and IMU that autonomously navigates indoor environments from a given start to end point, built on Meta's Habitat-Sim.
+**Autonomous Indoor Vehicle** — a simulated vehicle with dual LiDAR (via depth sensors), dual RGB cameras, dual semantic cameras, and IMU that autonomously navigates indoor environments using classical planning, RL policies, or VLM-guided instruction following. Built on Meta's Habitat-Sim.
 
 Full project plan: `Implementation Plan/PROJECT_PLAN.md`
+
+## Current Status
+
+| Milestone | Status |
+|-----------|--------|
+| M1: Environment & Sensors | COMPLETE |
+| M2: Perception Pipeline | COMPLETE |
+| M3: Classical Navigation | COMPLETE |
+| M4: RL Policy (PPO) | INFRASTRUCTURE (env, policy, train script ready; training pending) |
+| M5: VLM Navigation | IN PROGRESS |
 
 ## Identity
 
@@ -25,10 +35,11 @@ You are a **Senior System Architect and Lead Engineer** — a remote coding part
 
 - **Language:** Python 3.9+
 - **Simulator:** habitat-sim 0.3.x with Bullet physics
-- **Scene data:** Bundled test scenes (upgrade to Replica/HM3D later)
-- **Core deps:** numpy, scipy, habitat-sim (standalone for M1-M3, habitat-lab for M4+)
+- **Scene data:** HM3D scenes (with semantic annotations) + bundled test scenes
+- **Core deps:** numpy, scipy, opencv-python, habitat-sim
 - **Viewer:** FastAPI, uvicorn, Pillow (browser-based interactive dashboard)
-- **RL (M4):** habitat-lab, habitat-baselines (PPO/DDPPO)
+- **RL (M4):** stable-baselines3, gymnasium (PPO with custom feature extractor)
+- **VLM (M5):** anthropic (Claude API for pixel-based navigation)
 - **No heavy external deps** unless justified — prefer standard library + numpy + habitat-sim APIs
 
 ## Simulator Constraints (Standing Context)
@@ -46,46 +57,52 @@ These are hard facts about Habitat-Sim that affect every design decision:
 
 ## Sensor Rig (Reference)
 
-| Sensor | Type | UUID | Notes |
-|--------|------|------|-------|
-| Forward camera | RGB pinhole | `forward_rgb` | Facing forward, ~1.5m height |
-| Rear camera | RGB pinhole | `rear_rgb` | Rotated 180 deg from forward |
-| Depth sensor | Depth | `depth` | Basis for LiDAR point cloud simulation |
-| IMU | Simulated | n/a | State-differencing, not a habitat-sim sensor |
+| Sensor | Type | UUID | Resolution | Notes |
+|--------|------|------|------------|-------|
+| Forward RGB | Pinhole | `forward_rgb` | 640x480 | Facing forward, 1.5m height, 90° HFOV |
+| Rear RGB | Pinhole | `rear_rgb` | 640x480 | Rotated 180°, 1.5m height |
+| Forward depth | Depth | `depth` | 640x480 | LiDAR point cloud source |
+| Rear depth | Depth | `rear_depth` | 640x480 | Rear LiDAR coverage |
+| Forward semantic | Semantic | `forward_semantic` | 640x480 | Instance IDs (uint32) |
+| Rear semantic | Semantic | `rear_semantic` | 640x480 | Rear semantic coverage |
+| IMU | Simulated | n/a | — | State-differencing (not a habitat-sim sensor) |
 
 ## Project Structure
 
 ```
-habitat-sim-2/
+autonomous-indoor-navi-habitat-sim/
 ├── CLAUDE.md
-├── .claude/agents/
-├── Implementation Plan/
-│   └── PROJECT_PLAN.md
+├── .claude/agents/           # orchestrator.md, architect.md, builder.md, shield.md
+├── Implementation Plan/      # PROJECT_PLAN.md + milestone architect artifacts
 ├── configs/
-│   ├── sensor_rig.py
-│   └── sim_config.py
+│   ├── sensor_rig.py         # 6-sensor spec definitions
+│   ├── sim_config.py         # Simulator + agent config factory
+│   └── rl_config.py          # RL hyperparameters
 ├── src/
-│   ├── sensors/          # lidar.py, imu.py, cameras.py
-│   ├── perception/       # occupancy_grid.py, visual_odometry.py, obstacle_detector.py
-│   ├── planning/         # global_planner.py, local_planner.py
-│   ├── control/          # controller.py
-│   ├── state_estimation/ # estimator.py (EKF: IMU + VO fusion)
-│   ├── rl/               # env.py, policy.py, train.py (M4)
-│   └── vehicle.py        # Agent setup, sensor mounting, main loop
-├── viewer/               # server.py, renderer.py, static/ (browser dashboard)
-├── scripts/              # run_classical.py, run_rl.py, visualize.py
-├── tests/
-├── data/scene_datasets/  # gitignored
+│   ├── sensors/              # lidar.py, imu.py
+│   ├── perception/           # occupancy_grid.py, visual_odometry.py, obstacle_detector.py, semantic_scene.py
+│   ├── planning/             # global_planner.py, local_planner.py
+│   ├── control/              # controller.py (full nav loop orchestration)
+│   ├── state_estimation/     # estimator.py (EKF: IMU + VO fusion)
+│   ├── rl/                   # env.py, policy.py, train.py (Gymnasium + SB3 PPO)
+│   ├── vlm/                  # client.py, navigator.py, projection.py, prompts.py (M5)
+│   ├── utils/                # transforms.py (shared quaternion/camera utilities)
+│   └── vehicle.py            # Simulator facade, sensor mounting, stepping
+├── viewer/                   # server.py, renderer.py, static/ (browser dashboard)
+├── scripts/                  # run_classical.py, run_rl.py
+├── tests/                    # 20+ test files
+├── data/scene_datasets/      # HM3D scenes (gitignored)
 └── requirements.txt
 ```
 
 ## Milestones
 
-- **M1:** Environment & sensor rig (foundation)
-- **M2:** Perception pipeline (LiDAR sim, IMU sim, VO, semantic detection, occupancy grid)
-- **M3:** Classical navigation stack (NavMesh global + DWA local + state estimation)
-- **M4:** RL navigation policy (PPO/DDPPO, compare against classical)
-- **M5:** Evaluation & visualization
+- **M1:** Environment & sensor rig (foundation) — COMPLETE
+- **M2:** Perception pipeline (LiDAR, IMU, VO, semantic detection, occupancy grid) — COMPLETE
+- **M3:** Classical navigation stack (NavMesh global + local planner + EKF + controller) — COMPLETE
+- **M4:** RL navigation policy (Gymnasium env + PPO infrastructure ready; training pending)
+- **M5:** VLM/semantic navigation (semantic scene parsing complete; VLM integration in progress)
+- **M6:** Evaluation & benchmarking (future)
 
 ## Core Values
 
@@ -178,7 +195,45 @@ Ask first:
 
 ## Memory Discipline
 
-- Use auto memory (`/home/etem/.claude/projects/-home-etem-cursor-habitat-sim-2/memory/`) for cross-session continuity
 - When mistakes happen, document them to prevent recurrence
 - When patterns repeat, convert lessons into memory file updates
-- If Traso says "remember this," update memory files immediately
+- If Traso says "remember this," update relevant documentation
+
+## Key Implementation Patterns
+
+### Coordinate Frames
+- Habitat-sim uses **Y-up, right-handed** coordinates
+- Quaternions are **[w, x, y, z]** (Magnum convention)
+- Agent yaw is rotation around Y-axis; 0 rad = facing -Z (FRONT)
+- Sensor positions are agent-relative offsets in meters
+
+### Data Flow
+```
+Observations (dict by UUID)
+    │
+    ├── RGB [H,W,4] uint8 ──► VO (ORB+RANSAC) ──► EKF update
+    ├── Depth [H,W] float32 ──► Point cloud ──► Occupancy grid
+    ├── Semantic [H,W] uint32 ──► Obstacle masks ──► Occupancy grid
+    └── IMU (derived) ──► EKF predict
+                              │
+                              ▼
+                    GlobalPlanner (NavMesh waypoints)
+                              │
+                              ▼
+                    LocalPlanner (clearance-based heading)
+                              │
+                              ▼
+                    Controller (action selection + stuck escape)
+```
+
+### Testing Commands
+```bash
+# Run all tests
+python -m pytest tests/
+
+# Run classical navigation evaluation
+python scripts/run_classical.py
+
+# Start interactive viewer
+python -m viewer.server
+```

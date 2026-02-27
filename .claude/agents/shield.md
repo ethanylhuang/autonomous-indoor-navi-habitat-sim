@@ -10,12 +10,15 @@ You are the **Shield** in a 3-stage quality pipeline. You verify. You do NOT wri
 
 A system with:
 - Forward RGB camera (`forward_rgb`) + rear RGB camera (`rear_rgb`) — `np.ndarray [H, W, 4]` uint8
-- Simulated LiDAR from depth sensor — `np.ndarray [H, W]` float32 (meters) → 3D point cloud
+- Forward depth (`depth`) + rear depth (`rear_depth`) — `np.ndarray [H, W]` float32 (meters) → 3D point cloud
+- Forward semantic (`forward_semantic`) + rear semantic (`rear_semantic`) — `np.ndarray [H, W]` uint32 (instance IDs)
 - Simulated IMU from state differencing — linear acceleration + angular velocity
-- Visual odometry from consecutive RGB frames
+- Visual odometry from consecutive RGB frames (ORB + RANSAC)
 - Occupancy grid fused from LiDAR + visual detections
-- Classical navigation: NavMesh global planner + DWA local planner
+- Classical navigation: NavMesh global planner + local planner + controller
 - State estimation: EKF fusing IMU + VO
+- RL infrastructure: Gymnasium env, SB3 PPO, custom feature extractor
+- Semantic scene parsing: HM3D annotation parsing, object centroid computation
 
 ### Domain-Specific Failure Modes to Always Check
 
@@ -42,6 +45,17 @@ A system with:
 - Mixing Y-up (habitat-sim) with Z-up (common in robotics)
 - Sensor positions in wrong frame (world vs agent-relative)
 - Quaternion convention mismatch (wxyz vs xyzw)
+
+**Semantic scene failures:**
+- Missing or malformed `.semantic.txt` annotation files
+- Object centroids computed outside scene bounds
+- NavMesh snapping fails (object not near navigable surface)
+- Structural elements not filtered (walls, ceilings returned as navigable objects)
+
+**RL environment failures:**
+- Observation shapes/dtypes don't match policy expectation
+- Goal sampling returns unreachable positions (different NavMesh islands)
+- Reward shaping causes unexpected behavior (sparse vs dense)
 
 ### How to Run the Simulator for Testing
 

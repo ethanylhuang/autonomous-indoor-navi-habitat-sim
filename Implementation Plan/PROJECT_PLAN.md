@@ -2,7 +2,17 @@
 
 ## Overview
 
-Autonomous vehicle with 1 LiDAR (simulated), 2 RGB cameras (forward + rear), and IMU (simulated), navigating indoor environments from a given start to end point. Built on Meta's Habitat-Sim.
+Autonomous vehicle with simulated LiDAR (dual depth sensors), dual RGB cameras (forward + rear), dual semantic cameras, and simulated IMU, navigating indoor environments from a given start to end point. Built on Meta's Habitat-Sim.
+
+## Milestone Status
+
+| Milestone | Status | Description |
+|-----------|--------|-------------|
+| **M1** | COMPLETE | Environment & sensor rig |
+| **M2** | COMPLETE | Perception pipeline |
+| **M3** | COMPLETE | Classical navigation stack |
+| **M4** | INFRASTRUCTURE | RL navigation policy (env, policy, train script ready) |
+| **M5** | IN PROGRESS | VLM/semantic navigation |
 
 ## Habitat-Sim Constraints
 
@@ -122,65 +132,125 @@ Redundant localization: VO corrects long-term IMU drift; IMU corrects short-term
 - Compare against classical baseline on same episode set
 - **Validation:** trained policy achieves comparable or better SPL
 
-### M5 — Evaluation & Visualization
+### M5 — VLM-Guided Semantic Navigation
+
+**Goal:** Natural language instruction following via Vision-Language Models.
+
+**Completed:**
+- Semantic scene parsing from HM3D `.semantic.txt` annotation files
+- `SemanticSceneParser` — extracts object labels, IDs, regions
+- `SemanticObject` dataclass — object_id, label, centroid, navmesh_position, instance_number
+- Multi-view centroid computation (360-degree sweep for accurate world-space positions)
+- NavMesh snapping of object positions
+- Structural element filtering (walls, doors, ceilings excluded)
+- Viewer integration — semantic object dropdown for goal selection
+
+**In Progress:**
+- `VLMClient` — Anthropic Claude API wrapper for pixel-based navigation queries
+- `VLMNavigator` — Hierarchical controller: VLM pixel selection + classical planning
+- Pixel-to-world projection (`vlm/projection.py`)
+- VLM prompt engineering (`vlm/prompts.py`)
+
+**Architecture:**
+```
+User Instruction ("go to the red couch")
+         │
+         ▼
+   ┌───────────┐
+   │ VLMClient │ ◄── Claude API (pixel target selection)
+   └─────┬─────┘
+         │ (u, v) pixel
+         ▼
+   ┌─────────────┐
+   │ Projection  │ ◄── Depth + camera intrinsics
+   └─────┬───────┘
+         │ 3D world point
+         ▼
+   ┌─────────────┐
+   │ NavMesh Snap│
+   └─────┬───────┘
+         │ navigable goal
+         ▼
+   ┌─────────────┐
+   │ Classical   │ ◄── GlobalPlanner + LocalPlanner + Controller
+   │ Nav Stack   │
+   └─────────────┘
+```
+
+**Validation:**
+- Semantic object lookup by label (e.g., "couch", "table")
+- VLM-selected pixels project to valid navigable positions
+- End-to-end instruction following across HM3D scenes
+
+### M6 — Evaluation & Benchmarking (Future)
 
 **Goal:** Comprehensive benchmarking and debugging tools.
 
 - Top-down trajectory rendering with NavMesh overlay
-- Side-by-side classical vs RL comparison
+- Side-by-side classical vs RL vs VLM comparison
 - Sensor observation recording/replay
-- Benchmark suite across multiple scenes (upgrade to Replica/HM3D)
+- Benchmark suite across multiple HM3D scenes
+- Instruction-following success metrics
 
 ## File Structure
 
 ```
-habitat-sim-2/
-├── CLAUDE.md
+autonomous-indoor-navi-habitat-sim/
+├── CLAUDE.md                    # Project operating contract
 ├── .claude/agents/
-│   ├── architect.md
-│   ├── builder.md
-│   └── shield.md
+│   ├── orchestrator.md          # Main agent coordination protocol
+│   ├── architect.md             # Design phase agent
+│   ├── builder.md               # Implementation agent
+│   └── shield.md                # QA/verification agent
 ├── Implementation Plan/
-│   └── PROJECT_PLAN.md          # This file
+│   ├── PROJECT_PLAN.md          # This file
+│   ├── M1_ARCHITECT_ARTIFACT.md # M1 design spec
+│   ├── M2_ARCHITECT_ARTIFACT.md # M2 design spec
+│   ├── M3_ARCHITECT_ARTIFACT.md # M3 design spec
+│   └── M5_VLM_NAVIGATION.md     # M5 VLM design spec
 ├── configs/
-│   ├── sensor_rig.py            # Sensor specs (cameras, depth, IMU params)
-│   └── sim_config.py            # Simulator + agent configuration
+│   ├── sensor_rig.py            # Sensor specs (6 sensors: RGB, depth, semantic x2)
+│   ├── sim_config.py            # Simulator + agent configuration
+│   └── rl_config.py             # RL hyperparameters
 ├── src/
 │   ├── sensors/
 │   │   ├── lidar.py             # Depth → point cloud conversion
-│   │   ├── imu.py               # State-differencing IMU simulation
-│   │   └── cameras.py           # Camera config, image preprocessing
+│   │   └── imu.py               # State-differencing IMU simulation
 │   ├── perception/
 │   │   ├── occupancy_grid.py    # Fused grid (LiDAR + visual)
-│   │   ├── visual_odometry.py   # Feature-based VO from RGB frames
-│   │   └── obstacle_detector.py # Semantic segmentation pipeline
+│   │   ├── visual_odometry.py   # ORB + RANSAC VO from RGB frames
+│   │   ├── obstacle_detector.py # Semantic obstacle detection
+│   │   └── semantic_scene.py    # HM3D semantic scene parsing (M5)
 │   ├── planning/
-│   │   ├── global_planner.py    # NavMesh pathfinding wrapper
-│   │   └── local_planner.py     # DWA / obstacle avoidance
+│   │   ├── global_planner.py    # NavMesh pathfinding + corner smoothing
+│   │   └── local_planner.py     # Rule-based obstacle avoidance
 │   ├── control/
-│   │   └── controller.py        # Waypoint → action conversion
+│   │   └── controller.py        # Full nav loop orchestration
 │   ├── state_estimation/
-│   │   └── estimator.py         # IMU + VO fusion (EKF or similar)
+│   │   └── estimator.py         # EKF (IMU + VO fusion)
 │   ├── rl/                      # M4
-│   │   ├── env.py               # Gym-style environment wrapper
-│   │   ├── policy.py            # Policy network
-│   │   └── train.py             # Training loop
-│   └── vehicle.py               # Agent setup, sensor mounting, main loop
+│   │   ├── env.py               # Gymnasium environment wrapper
+│   │   ├── policy.py            # Multi-modal feature extractor (SB3)
+│   │   └── train.py             # PPO training loop
+│   ├── vlm/                     # M5
+│   │   ├── client.py            # Anthropic Claude API wrapper
+│   │   ├── navigator.py         # Hierarchical VLM + classical planner
+│   │   ├── projection.py        # Pixel → world coordinate projection
+│   │   └── prompts.py           # VLM prompt templates
+│   ├── utils/
+│   │   └── transforms.py        # Shared quaternion/camera/angle utilities
+│   └── vehicle.py               # Simulator facade, sensor mounting, stepping
 ├── viewer/
 │   ├── server.py                # FastAPI + WebSocket backend
-│   ├── static/
-│   │   ├── index.html           # Dashboard UI
-│   │   └── app.js               # Keyboard controls, WebSocket client, canvas rendering
-│   └── renderer.py              # Sensor frame encoding, top-down view rendering
+│   ├── renderer.py              # Visualization (RGB, depth, semantic, occupancy, top-down)
+│   └── static/
+│       ├── index.html           # Dashboard UI
+│       └── app.js               # Keyboard controls, scene/goal selection, WebSocket
 ├── scripts/
-│   ├── run_classical.py         # Run classical nav pipeline
-│   ├── run_rl.py                # Run RL policy
-│   └── visualize.py             # Trajectory + sensor visualization
-├── tests/
-│   ├── test_sensors.py
-│   ├── test_planner.py
-│   └── test_navigation.py
+│   ├── run_classical.py         # Classical nav evaluation
+│   └── run_rl.py                # RL policy evaluation
+├── tests/                       # 20+ test files covering all modules
 ├── data/
-│   └── scene_datasets/          # Downloaded scenes (gitignored)
+│   └── scene_datasets/          # HM3D/test scenes (gitignored)
 └── requirements.txt
 ```
